@@ -1,0 +1,4 @@
+[env]
+# Path to the WinDivert SDK — read by the windivert-sys build script.
+# `relative = true` resolves the path from the workspace root.
+WINDIVERT_PATH = { value = "WinDivert-2.2.2-A/x64", relative = true }

@@ -1,0 +1,56 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "cargo build (debug)",
+            "type": "shell",
+            "command": "cargo build --bin=argus --package=argus",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$rustc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "cargo build (release)",
+            "type": "shell",
+            "command": "cargo build --bin=argus --package=argus --release",
+            "group": "build",
+            "problemMatcher": ["$rustc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "cargo check",
+            "type": "shell",
+            "command": "cargo check --bin=argus --package=argus",
+            "group": "build",
+            "problemMatcher": ["$rustc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "cargo clippy",
+            "type": "shell",
+            "command": "cargo clippy --bin=argus --package=argus",
+            "group": "test",
+            "problemMatcher": ["$rustc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}

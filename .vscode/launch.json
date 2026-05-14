@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "cppvsdbg",
+            "request": "launch",
+            "name": "Argus",
+            "program": "${workspaceFolder}/target/debug/argus.exe",
+            "args": ["-c", "configs/default.ini", "-v"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build (debug)",
+            "console": "integratedTerminal",
+        }
+    ]
+}
