@@ -147,7 +147,7 @@ async fn handle_irc(
 }
 
 pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
-    let addr = format!("{}:{}", bind_addr, config.port);
+    let addr = format!("{}:{}", bind_addr, config.listener_port);
     let listener = TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("Failed to bind IRC on {}: {}", addr, e))?;
 

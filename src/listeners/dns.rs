@@ -265,7 +265,7 @@ fn log_dns_query(question: &DnsQuestion, response_val: &str, src_addr: &SocketAd
 
 /// Start the DNS listener (UDP)
 pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
-    let addr = format!("{}:{}", bind_addr, config.port);
+    let addr = format!("{}:{}", bind_addr, config.listener_port);
     let socket = UdpSocket::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("Failed to bind DNS listener on {}: {}", addr, e))?;
 

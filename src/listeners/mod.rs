@@ -59,12 +59,17 @@ impl ListenerManager {
 
             let handle = match cfg.listener_type.as_str() {
                 "HTTPListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [{}{}]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port,
+                        port_str,
                         cfg.protocol.to_uppercase().bright_cyan(),
                         if cfg.use_ssl { "/SSL".bright_yellow().to_string() } else { String::new() }
                     );
@@ -77,12 +82,17 @@ impl ListenerManager {
                     })
                 }
                 "DNSListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [{}]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port,
+                        port_str,
                         cfg.protocol.to_uppercase().bright_cyan()
                     );
                     let ct = self.conn_table.clone();
@@ -94,12 +104,17 @@ impl ListenerManager {
                     })
                 }
                 "SMTPListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [TCP]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port
+                        port_str
                     );
                     let ct = self.conn_table.clone();
                     let rl = self.request_logger.clone();
@@ -110,12 +125,17 @@ impl ListenerManager {
                     })
                 }
                 "FTPListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [TCP]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port
+                        port_str
                     );
                     let ct = self.conn_table.clone();
                     let rl = self.request_logger.clone();
@@ -126,12 +146,17 @@ impl ListenerManager {
                     })
                 }
                 "IRCListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [TCP]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port
+                        port_str
                     );
                     let ct = self.conn_table.clone();
                     let rl = self.request_logger.clone();
@@ -142,12 +167,17 @@ impl ListenerManager {
                     })
                 }
                 "POPListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [TCP]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port
+                        port_str
                     );
                     let ct = self.conn_table.clone();
                     let rl = self.request_logger.clone();
@@ -158,12 +188,17 @@ impl ListenerManager {
                     })
                 }
                 "RawListener" => {
+                    let port_str = if cfg.listener_port != cfg.service_port {
+                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
+                    } else {
+                        cfg.listener_port.to_string()
+                    };
                     println!(
                         "  {} {} on {}:{} [{}]",
                         "●".bright_green(),
                         cfg.name.bright_white().bold(),
                         bind,
-                        cfg.port,
+                        port_str,
                         cfg.protocol.to_uppercase().bright_cyan()
                     );
                     let ct = self.conn_table.clone();

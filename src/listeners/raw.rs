@@ -99,7 +99,7 @@ async fn handle_tcp_connection(
 }
 
 pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
-    let addr = format!("{}:{}", bind_addr, config.port);
+    let addr = format!("{}:{}", bind_addr, config.listener_port);
 
     if config.protocol.to_lowercase() == "tcp" {
         let listener = TcpListener::bind(&addr).await

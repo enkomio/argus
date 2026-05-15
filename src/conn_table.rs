@@ -2,7 +2,7 @@
 //!
 //! The diverter writes one entry per new intercepted connection;
 //! listeners read the entry to discover the original destination and
-//! decide whether to respond with fake data or forward to the real host.
+//! decide whether to respond with fake data or pass through to the real host.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -47,8 +47,7 @@ impl ConnInfo {
         }
     }
 
-    /// Returns `true` if this connection should be forwarded according to
-    /// `list`.
+    /// Returns `true` if this connection matches the passthrough `list`.
     ///
     /// Each entry in `list` can be:
     ///
@@ -64,11 +63,11 @@ impl ConnInfo {
     /// (the `.` in regex matches any char, which is fine in practice).  Use
     /// `curl\.exe` for a precise literal-dot match.
     ///
-    /// An empty list means "never forward".
+    /// An empty list means "never pass through".
     ///
     /// > **Note**: IPv6 destination matching requires the diverter to support
     /// > IPv6 packets (currently IPv4-only).
-    pub fn matches_forward_list(&self, list: &[String]) -> bool {
+    pub fn matches_passthrough_list(&self, list: &[String]) -> bool {
         if list.is_empty() {
             return false;
         }
@@ -143,7 +142,7 @@ pub fn new_shared_table() -> SharedConnTable {
 /// Returns `true` when the connection on `port` matches any entry in `no_log`,
 /// meaning log files should **not** be written for this connection.
 ///
-/// Uses the same matching logic as [`ConnInfo::matches_forward_list`]:
+/// Uses the same matching logic as [`ConnInfo::matches_passthrough_list`]:
 /// process-name regex, PID, IPv4, and IPv6.  Returns `false` when `no_log`
 /// is empty, when no conn-table entry exists for `port`, or when nothing
 /// matches.
@@ -154,7 +153,7 @@ pub fn should_skip_log(table: &SharedConnTable, port: u16, no_log: &[String]) ->
     table
         .read()
         .ok()
-        .and_then(|tbl| tbl.get(&port).map(|info| info.matches_forward_list(no_log)))
+        .and_then(|tbl| tbl.get(&port).map(|info| info.matches_passthrough_list(no_log)))
         .unwrap_or(false)
 }
 

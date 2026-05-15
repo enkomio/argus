@@ -34,7 +34,10 @@ pub struct ListenerConfig {
     pub name: String,
     pub listener_type: String,
     pub enabled: bool,
-    pub port: u16,
+    /// Port WinDivert intercepts (traffic destined for this port is captured).
+    pub service_port: u16,
+    /// Port Argus binds the listener on. Defaults to `service_port` when absent from config.
+    pub listener_port: u16,
     pub protocol: String,
     pub use_ssl: bool,
     pub timeout: u64,
@@ -44,25 +47,25 @@ pub struct ListenerConfig {
     pub response_txt: Option<String>,
     pub banner: Option<String>,
     pub custom_responses: HashMap<String, String>,
-    /// Process filter for forwarding.
+    /// Process filter for passthrough.
     ///
     /// When non-empty, connections whose originating process matches one of
-    /// the entries are forwarded transparently to the real destination;
+    /// the entries are passed through transparently to the real destination;
     /// all other connections receive the usual fake response.
     ///
     /// Each entry is either a process name (`"curl.exe"`) or a numeric PID
     /// (`"1234"`), case-insensitive.  Multiple values are comma-separated:
     ///
     /// ```ini
-    /// Forward: curl.exe, wget.exe, 5678
+    /// Passthrough: curl.exe, wget.exe, 5678
     /// ```
     ///
-    /// An empty or absent `Forward` key disables forwarding entirely.
-    pub forward: Vec<String>,
+    /// An empty or absent `Passthrough` key disables passthrough entirely.
+    pub passthrough: Vec<String>,
 
     /// Logging suppression filter.
     ///
-    /// Accepts the same entry types as `Forward` (process name / regex, PID,
+    /// Accepts the same entry types as `Passthrough` (process name / regex, PID,
     /// IPv4, IPv6, domain, domain+path, URL).  When a connection matches any
     /// entry, request and response log files are **not** written for that
     /// connection.  All other connections are logged normally.
@@ -168,10 +171,15 @@ impl ArgusConfig {
                 .cloned()
                 .unwrap_or_default();
 
-            let port: u16 = data
-                .get("port")
+            let service_port: u16 = data
+                .get("serviceport")
+                .or_else(|| data.get("port"))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
+            let listener_port: u16 = data
+                .get("listenerport")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(service_port);
 
             let protocol = data
                 .get("protocol")
@@ -193,7 +201,8 @@ impl ArgusConfig {
                 name: section.clone(),
                 listener_type: listener_type.clone(),
                 enabled,
-                port,
+                service_port,
+                listener_port,
                 protocol,
                 use_ssl,
                 timeout,
@@ -203,8 +212,8 @@ impl ArgusConfig {
                 response_txt: data.get("responsetxt").cloned(),
                 banner: data.get("banner").cloned(),
                 custom_responses: HashMap::new(),
-                forward: data
-                    .get("forward")
+                passthrough: data
+                    .get("passthrough")
                     .map(|v| {
                         v.split(',')
                          .map(|s| s.trim().to_string())
@@ -240,7 +249,8 @@ impl ArgusConfig {
                 name: "HTTPListener".to_string(),
                 listener_type: "HTTPListener".to_string(),
                 enabled: true,
-                port: 80,
+                service_port: 80,
+                listener_port: 18080,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 10,
@@ -250,14 +260,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "HTTPSListener".to_string(),
                 listener_type: "HTTPListener".to_string(),
                 enabled: true,
-                port: 443,
+                service_port: 443,
+                listener_port: 18443,
                 protocol: "tcp".to_string(),
                 use_ssl: true,
                 timeout: 10,
@@ -267,14 +278,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "DNSListener".to_string(),
                 listener_type: "DNSListener".to_string(),
                 enabled: true,
-                port: 53,
+                service_port: 53,
+                listener_port: 10053,
                 protocol: "udp".to_string(),
                 use_ssl: false,
                 timeout: 5,
@@ -284,14 +296,15 @@ impl ArgusConfig {
                 response_txt: Some("ARGUS".to_string()),
                 banner: None,
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "SMTPListener".to_string(),
                 listener_type: "SMTPListener".to_string(),
                 enabled: true,
-                port: 25,
+                service_port: 25,
+                listener_port: 10025,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 30,
@@ -301,14 +314,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("220 argus SMTP Service Ready".to_string()),
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "FTPListener".to_string(),
                 listener_type: "FTPListener".to_string(),
                 enabled: true,
-                port: 21,
+                service_port: 21,
+                listener_port: 10021,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 30,
@@ -318,14 +332,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("220 Argus FTP Server".to_string()),
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "RawTCPListener".to_string(),
                 listener_type: "RawListener".to_string(),
                 enabled: true,
-                port: 1337,
+                service_port: 1337,
+                listener_port: 11337,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 5,
@@ -335,14 +350,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "IRCListener".to_string(),
                 listener_type: "IRCListener".to_string(),
                 enabled: true,
-                port: 6667,
+                service_port: 6667,
+                listener_port: 16667,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 30,
@@ -352,14 +368,15 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some(":argus 001 user :Welcome to Argus IRC".to_string()),
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
             ListenerConfig {
                 name: "POPListener".to_string(),
                 listener_type: "POPListener".to_string(),
                 enabled: true,
-                port: 110,
+                service_port: 110,
+                listener_port: 10110,
                 protocol: "tcp".to_string(),
                 use_ssl: false,
                 timeout: 30,
@@ -369,7 +386,7 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("+OK Argus POP3 Server Ready".to_string()),
                 custom_responses: HashMap::new(),
-                forward: vec![],
+                passthrough: vec![],
                 no_log: vec![],
             },
         ]

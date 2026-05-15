@@ -2,10 +2,10 @@
 //!
 //! In HTTPS mode the listener performs TLS termination (MITM): it presents a
 //! self-signed certificate to the connecting client, decrypts the traffic, and
-//! logs the plaintext request/response.  When forwarding, a new TLS connection
-//! is opened to the real server (certificate errors on the upstream side are
-//! intentionally ignored so that malware using self-signed or expired certs is
-//! also forwarded correctly).
+//! logs the plaintext request/response.  When in passthrough mode, a new TLS
+//! connection is opened to the real server (certificate errors on the upstream
+//! side are intentionally ignored so that malware using self-signed or expired
+//! certs is also passed through correctly).
 //!
 //! The self-signed CA certificate is printed to stdout at startup so the
 //! analyst can import it into the analysis VM's trust store.
@@ -95,14 +95,14 @@ fn log_http(method: &str, uri: &str, host: &str, src_addr: &SocketAddr, config: 
 }
 
 // ---------------------------------------------------------------------------
-// Forward / NoLog domain matching
+// Passthrough / NoLog domain matching
 // ---------------------------------------------------------------------------
 
-fn matches_forward_domain(forward: &[String], host: &str, uri: &str) -> bool {
+fn matches_passthrough_domain(passthrough: &[String], host: &str, uri: &str) -> bool {
     let req_host = host.split(':').next().unwrap_or(host);
     let target   = format!("{}{}", req_host, uri);
 
-    for entry in forward {
+    for entry in passthrough {
         let s = entry.trim();
         if s.is_empty() { continue; }
         let s = s.strip_prefix("https://")
@@ -647,7 +647,7 @@ where
     W: AsyncWrite + Unpin,
 {
     debug!("handle_connection: {} proto={}", src_addr, if config.use_ssl { "https" } else { "http" });
-    let conn_info = if !config.forward.is_empty() {
+    let conn_info = if !config.passthrough.is_empty() {
         conn_table.read().ok().and_then(|tbl| tbl.get(&src_addr.port()).cloned())
     } else {
         None
@@ -707,33 +707,33 @@ where
     // -- Phase-2 should_log: refine with host/URI domain matching --------------
     // Only affects response logging; the request is already logged above.
     if should_log && !config.no_log.is_empty() {
-        if matches_forward_domain(&config.no_log, &host, uri) {
+        if matches_passthrough_domain(&config.no_log, &host, uri) {
             should_log = false;
         }
     }
 
-    // -- Forward destination ---------------------------------------------------
-    let forward_dst: Option<String> = if !config.forward.is_empty() {
+    // -- Passthrough destination -----------------------------------------------
+    let passthrough_dst: Option<String> = if !config.passthrough.is_empty() {
         if let Some(ref info) = conn_info {
-            if info.matches_forward_list(&config.forward) {
+            if info.matches_passthrough_list(&config.passthrough) {
                 Some(info.orig_dst_addr())
-            } else if matches_forward_domain(&config.forward, &host, uri) {
+            } else if matches_passthrough_domain(&config.passthrough, &host, uri) {
                 Some(info.orig_dst_addr())
             } else {
                 None
             }
         } else {
-            debug!("Forward: no conn_table entry for port {}, falling back to intercept", src_addr.port());
+            debug!("Passthrough: no conn_table entry for port {}, falling back to intercept", src_addr.port());
             None
         }
     } else {
         None
     };
 
-    // -- Forward path ----------------------------------------------------------
-    if let Some(ref dst_addr) = forward_dst {
+    // -- Passthrough path ------------------------------------------------------
+    if let Some(ref dst_addr) = passthrough_dst {
         let label = conn_info.as_ref().map(|info| {
-            if info.matches_forward_list(&config.forward) {
+            if info.matches_passthrough_list(&config.passthrough) {
                 format!("[{}]", info.process_label())
             } else {
                 format!("(Host: {})", host)
@@ -745,14 +745,14 @@ where
             format!("[{}]", config.name).bright_magenta(),
             src_addr.to_string().yellow(),
             dst_addr.bright_white(),
-            "FORWARDED".bright_blue().bold(),
+            "PASSTHROUGH".bright_blue().bold(),
             label.dimmed(),
         );
 
         match tokio::net::TcpStream::connect(dst_addr).await {
             Ok(tcp_remote) => {
                 if config.use_ssl {
-                    // Upgrade outbound connection to TLS (MITM forward).
+                    // Upgrade outbound connection to TLS (MITM passthrough).
                     let sni_host = host.split(':').next().filter(|h| !h.is_empty())
                         .unwrap_or_else(|| dst_addr.split(':').next().unwrap_or("unknown"));
                     match ServerName::try_from(sni_host.to_string()) {
@@ -761,12 +761,12 @@ where
                                 Ok(connector) => {
                                     match connector.connect(server_name, tcp_remote).await {
                                         Ok(tls_remote) => {
-                                            if let Err(e) = forward_and_log(
+                                            if let Err(e) = passthrough_and_log(
                                                 tls_remote, &mut stream_r, &mut stream_w,
                                                 &buf[..n], should_log,
                                                 &request_logger, log_pid, &log_name, proto, log_counter,
                                             ).await {
-                                                debug!("TLS forward error: {}", e);
+                                                debug!("TLS passthrough error: {}", e);
                                             }
                                         }
                                         Err(e) => warn!("TLS handshake to {}: {}", dst_addr, e),
@@ -778,17 +778,17 @@ where
                         Err(_) => warn!("Invalid SNI hostname: {}", sni_host),
                     }
                 } else {
-                    // Plain TCP forward.
-                    if let Err(e) = forward_and_log(
+                    // Plain TCP passthrough.
+                    if let Err(e) = passthrough_and_log(
                         tcp_remote, &mut stream_r, &mut stream_w,
                         &buf[..n], should_log,
                         &request_logger, log_pid, &log_name, proto, log_counter,
                     ).await {
-                        debug!("TCP forward error: {}", e);
+                        debug!("TCP passthrough error: {}", e);
                     }
                 }
             }
-            Err(e) => warn!("Forward: could not connect to {}: {}", dst_addr, e),
+            Err(e) => warn!("Passthrough: could not connect to {}: {}", dst_addr, e),
         }
         return Ok(());
     }
@@ -829,8 +829,8 @@ where
 
 /// Helper: write `req_bytes` to `remote`, then capture/log the response, then
 /// drain for keep-alive.  Extracted to avoid code duplication between the
-/// plain-TCP and TLS forward branches.
-async fn forward_and_log<S, R, W>(
+/// plain-TCP and TLS passthrough branches.
+async fn passthrough_and_log<S, R, W>(
     remote: S,
     client_r: &mut R,
     client_w: &mut W,
@@ -879,7 +879,7 @@ pub async fn start(
     conn_table: SharedConnTable,
     request_logger: Option<SharedRequestLogger>,
 ) -> Result<()> {
-    let addr     = format!("{}:{}", bind_addr, config.port);
+    let addr     = format!("{}:{}", bind_addr, config.listener_port);
     let listener = TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("Failed to bind HTTP listener on {}: {}", addr, e))?;
 

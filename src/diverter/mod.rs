@@ -40,8 +40,7 @@ const RECV_BUF: usize = 65535;
 struct ConnEntry {
     orig_src_ip: [u8; 4], // app's real source IP
     orig_dst_ip: [u8; 4], // external host the app wanted to reach
-    /// True when this connection originates from Argus itself (forward mode).
-    /// These packets are passed through unchanged so they reach the real server.
+    /// True when this connection originates from Argus itself (passthrough mode).
     bypass: bool,
 }
 
@@ -70,9 +69,10 @@ impl Diverter {
 
         info!("Diverter: active — full bidirectional NAT enabled");
 
+        let port_maps = PortMaps::from_config(config);
         std::thread::Builder::new()
             .name("argus-diverter".to_string())
-            .spawn(move || packet_loop(handle, conn_table))
+            .spawn(move || packet_loop(handle, conn_table, port_maps))
             .context("Failed to spawn diverter thread")?;
 
         Ok(())
@@ -81,32 +81,57 @@ impl Diverter {
 
 // ── Filter builder ────────────────────────────────────────────────────────────
 
+/// Port mapping: service_port → listener_port (outbound rewrite) and vice versa.
+struct PortMaps {
+    /// service_port → listener_port  (used when app packet arrives, to redirect to listener)
+    svc_to_lst: HashMap<u16, u16>,
+    /// listener_port → service_port  (used when listener response arrives, to restore original port)
+    lst_to_svc: HashMap<u16, u16>,
+}
+
+impl PortMaps {
+    fn from_config(config: &ArgusConfig) -> Self {
+        let mut svc_to_lst = HashMap::new();
+        let mut lst_to_svc = HashMap::new();
+        for l in &config.listeners {
+            if !l.enabled { continue; }
+            svc_to_lst.insert(l.service_port, l.listener_port);
+            lst_to_svc.insert(l.listener_port, l.service_port);
+        }
+        Self { svc_to_lst, lst_to_svc }
+    }
+}
+
 fn build_filter(config: &ArgusConfig) -> String {
-    let mut tcp_ports: Vec<u16> = Vec::new();
-    let mut udp_ports: Vec<u16> = Vec::new();
+    // Outbound (app → external): intercept by DstPort == service_port.
+    // Loopback (listener → app): intercept by SrcPort == listener_port.
+    let mut tcp_svc:  Vec<u16> = Vec::new();
+    let mut udp_svc:  Vec<u16> = Vec::new();
+    let mut tcp_lst:  Vec<u16> = Vec::new();
+    let mut udp_lst:  Vec<u16> = Vec::new();
 
     for l in &config.listeners {
         if !l.enabled { continue; }
         match l.protocol.to_lowercase().as_str() {
-            "tcp" => tcp_ports.push(l.port),
-            "udp" => udp_ports.push(l.port),
+            "tcp" => { tcp_svc.push(l.service_port); tcp_lst.push(l.listener_port); }
+            "udp" => { udp_svc.push(l.service_port); udp_lst.push(l.listener_port); }
             _ => {}
         }
     }
 
-    let mut out_clauses: Vec<String> = Vec::new(); // match DstPort (outbound)
-    let mut lb_clauses:  Vec<String> = Vec::new(); // match SrcPort (loopback responses)
+    let mut out_clauses: Vec<String> = Vec::new();
+    let mut lb_clauses:  Vec<String> = Vec::new();
 
-    if !tcp_ports.is_empty() {
-        let dst = tcp_ports.iter().map(|p| format!("tcp.DstPort == {p}")).collect::<Vec<_>>().join(" || ");
-        let src = tcp_ports.iter().map(|p| format!("tcp.SrcPort == {p}")).collect::<Vec<_>>().join(" || ");
+    if !tcp_svc.is_empty() {
+        let dst = tcp_svc.iter().map(|p| format!("tcp.DstPort == {p}")).collect::<Vec<_>>().join(" || ");
+        let src = tcp_lst.iter().map(|p| format!("tcp.SrcPort == {p}")).collect::<Vec<_>>().join(" || ");
         out_clauses.push(format!("(tcp && ({dst}))"));
         lb_clauses.push(format!("(tcp && ({src}))"));
     }
 
-    if !udp_ports.is_empty() {
-        let dst = udp_ports.iter().map(|p| format!("udp.DstPort == {p}")).collect::<Vec<_>>().join(" || ");
-        let src = udp_ports.iter().map(|p| format!("udp.SrcPort == {p}")).collect::<Vec<_>>().join(" || ");
+    if !udp_svc.is_empty() {
+        let dst = udp_svc.iter().map(|p| format!("udp.DstPort == {p}")).collect::<Vec<_>>().join(" || ");
+        let src = udp_lst.iter().map(|p| format!("udp.SrcPort == {p}")).collect::<Vec<_>>().join(" || ");
         out_clauses.push(format!("(udp && ({dst}))"));
         lb_clauses.push(format!("(udp && ({src}))"));
     }
@@ -122,10 +147,10 @@ fn build_filter(config: &ArgusConfig) -> String {
 
 // ── Packet loop ───────────────────────────────────────────────────────────────
 
-fn packet_loop(handle: WinDivert<NetworkLayer>, shared_table: SharedConnTable) {
+fn packet_loop(handle: WinDivert<NetworkLayer>, shared_table: SharedConnTable, port_maps: PortMaps) {
     let mut conn_table: HashMap<u16, ConnEntry> = HashMap::new();
     let mut buf = vec![0u8; RECV_BUF];
-    // Our own PID — connections originating from Argus itself (forward mode) must
+    // Our own PID — connections originating from Argus itself (passthrough mode) must
     // bypass the NAT so they reach the real destination instead of looping back.
     let own_pid = std::process::id();
 
@@ -167,13 +192,17 @@ fn packet_loop(handle: WinDivert<NetworkLayer>, shared_table: SharedConnTable) {
                         if existing.bypass {
                             should_bypass = true;
                         } else {
+                            let listener_port = port_maps.svc_to_lst
+                                .get(&dst_port).copied().unwrap_or(dst_port);
                             debug!(
-                                "Diverter NAT out: port:{} → {}.{}.{}.{}:{}",
+                                "Diverter NAT out: port:{} → {}.{}.{}.{}:{} (listener:{})",
                                 src_port,
                                 orig_dst[0], orig_dst[1], orig_dst[2], orig_dst[3], dst_port,
+                                listener_port,
                             );
                             data[12..16].copy_from_slice(&LOOPBACK);
                             data[16..20].copy_from_slice(&LOOPBACK);
+                            data[ihl + 2..ihl + 4].copy_from_slice(&listener_port.to_be_bytes());
                         }
                     } else {
                         // New connection: resolve the owning process.
@@ -187,15 +216,17 @@ fn packet_loop(handle: WinDivert<NetworkLayer>, shared_table: SharedConnTable) {
                         });
 
                         if is_argus {
-                            // Argus is forwarding this connection to the real server —
+                            // Argus is passing through this connection to the real server —
                             // let the packet through unchanged so it doesn't loop back.
                             debug!(
-                                "Diverter: argus forward port:{} → {}.{}.{}.{}:{} bypassed",
+                                "Diverter: argus passthrough port:{} → {}.{}.{}.{}:{} bypassed",
                                 src_port,
                                 orig_dst[0], orig_dst[1], orig_dst[2], orig_dst[3], dst_port,
                             );
                             should_bypass = true;
                         } else {
+                            let listener_port = port_maps.svc_to_lst
+                                .get(&dst_port).copied().unwrap_or(dst_port);
                             let label_str = match (&proc_name, proc_pid) {
                                 (Some(n), Some(p)) => format!("{} (PID {})", n, p),
                                 (None,    Some(p)) => format!("PID {}", p),
@@ -220,22 +251,29 @@ fn packet_loop(handle: WinDivert<NetworkLayer>, shared_table: SharedConnTable) {
                             }
                             data[12..16].copy_from_slice(&LOOPBACK);
                             data[16..20].copy_from_slice(&LOOPBACK);
+                            data[ihl + 2..ihl + 4].copy_from_slice(&listener_port.to_be_bytes());
                         }
                     }
 
                 } else {
                     // ── Listener → app ───────────────────────────────────────────
+                    let src_port = u16::from_be_bytes([data[ihl],     data[ihl + 1]]);
                     let dst_port = u16::from_be_bytes([data[ihl + 2], data[ihl + 3]]);
 
                     if let Some(entry) = conn_table.get(&dst_port) {
                         if !entry.bypass {
                             let orig_src = entry.orig_src_ip;
                             let orig_dst = entry.orig_dst_ip;
-                            data[12..16].copy_from_slice(&orig_dst); // src → original dst IP
-                            data[16..20].copy_from_slice(&orig_src); // dst → app's real IP
+                            // Restore src port: listener_port → service_port.
+                            let svc_port = port_maps.lst_to_svc
+                                .get(&src_port).copied().unwrap_or(src_port);
+                            data[12..16].copy_from_slice(&orig_dst); // src IP → original dst IP
+                            data[16..20].copy_from_slice(&orig_src); // dst IP → app's real IP
+                            data[ihl..ihl + 2].copy_from_slice(&svc_port.to_be_bytes());
                             debug!(
-                                "Diverter NAT in:  → {}.{}.{}.{}:{}",
-                                orig_src[0], orig_src[1], orig_src[2], orig_src[3], dst_port,
+                                "Diverter NAT in:  port:{} → {}.{}.{}.{}",
+                                dst_port,
+                                orig_src[0], orig_src[1], orig_src[2], orig_src[3],
                             );
                         }
                     }

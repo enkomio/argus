@@ -11,7 +11,7 @@ Key capabilities:
 - **Protocol-aware listeners** — HTTP/HTTPS, DNS, SMTP, FTP, IRC, POP3, raw TCP/UDP
 - **Per-host HTTPS interception** — automatic CA generation with dynamic per-hostname leaf certificates (mitmproxy-style); install the CA once and all TLS traffic is decryptable
 - **Process identification** — every intercepted connection is attributed to the originating process name and PID
-- **Selective forwarding** — chosen processes, IPs, domains, or URL patterns are forwarded transparently to the real destination instead of receiving a fake response
+- **Selective passthrough** — chosen processes, IPs, domains, or URL patterns are passed through transparently to the real destination instead of receiving a fake response
 - **Selective logging suppression** — `NoLog` entries exclude matching connections from capture files
 - **Request/response capture** — every intercepted transaction is saved to disk under `capture/<process>/<pid>/<protocol>/`
 - **Customisable fake responses** — drop files into `default_files/` to serve custom content per path; built-in fallback if the directory or file is absent
@@ -79,8 +79,8 @@ Protocol: TCP
 UseSSL: Yes
 Timeout: 10
 
-# Optional: forward matching connections to the real destination.
-# Forward: curl.exe, 1234, 93.184.216.34, example\.com, http://evil\.com/payload
+# Optional: pass through matching connections to the real destination.
+# Passthrough: curl.exe, 1234, 93.184.216.34, example\.com, http://evil\.com/payload
 
 # Optional: suppress capture files for matching connections.
 # NoLog: curl.exe, 1234, 93.184.216.34, analytics\.example\.com
@@ -209,9 +209,9 @@ Timeout: 5
 
 Accepts any traffic, echoes it back, and logs a hex dump of up to 256 bytes per packet. Used as the default catch-all for ports with no dedicated listener.
 
-### Selective forwarding
+### Selective passthrough
 
-The `Forward` key accepts a comma-separated list of entries. A connection is forwarded to the real destination when **any** entry matches. Supported entry types:
+The `Passthrough` key accepts a comma-separated list of entries. A connection is passed through to the real destination when **any** entry matches. Supported entry types:
 
 | Entry type   | Example                              | Matched against              |
 |--------------|--------------------------------------|------------------------------|
@@ -226,24 +226,24 @@ The `Forward` key accepts a comma-separated list of entries. A connection is for
 **Process names and domain/URL entries are treated as case-insensitive regular expressions** anchored at the start (`^`). A plain name like `curl.exe` still works — the `.` in regex matches any character, which is harmless in practice. Use `curl\.exe` for a precise literal-dot match.
 
 ```ini
-# Forward any process whose name starts with "curl"
-Forward: curl.*
+# Pass through any process whose name starts with "curl"
+Passthrough: curl.*
 
-# Forward requests to any .example TLD
-Forward: .*\.example\.(com|it|org)
+# Pass through requests to any .example TLD
+Passthrough: .*\.example\.(com|it|org)
 
-# Forward requests to a specific path only
-Forward: updates\.vendor\.com/v2/check
+# Pass through requests to a specific path only
+Passthrough: updates\.vendor\.com/v2/check
 
 # Mix multiple entry types
-Forward: malware_loader.exe, 93.184.216.34, c2\.evil\.io
+Passthrough: malware_loader.exe, 93.184.216.34, c2\.evil\.io
 ```
 
-When a connection is forwarded:
+When a connection is passed through:
 - **Phase 1** (before reading data): PID, process name, and IP entries are checked. If matched, the raw TCP stream is proxied transparently (`copy_bidirectional`).
 - **Phase 2** (after reading HTTP headers): domain and URL entries are checked against the `Host` header and URI. The already-read request bytes are replayed to the real server before proxying the rest.
 
-Argus's own outbound connections (created during forwarding) are automatically excluded from WinDivert interception to prevent redirect loops.
+Argus's own outbound connections (created during passthrough) are automatically excluded from WinDivert interception to prevent redirect loops.
 
 ### Selective logging suppression
 
@@ -279,7 +279,7 @@ The default capture directory is `capture\` relative to the working directory. O
 
 | Listener      | Port  | Protocol | Description                                    |
 |---------------|-------|----------|------------------------------------------------|
-| HTTPListener  | 80    | TCP      | HTTP — serves fake HTML/files, forwards on match |
+| HTTPListener  | 80    | TCP      | HTTP — serves fake HTML/files, passthrough on match |
 | HTTPSListener | 443   | TCP      | HTTPS — per-host MITM certs, decrypted capture |
 | DNSListener   | 53    | UDP      | DNS queries → configurable A/AAAA/MX/TXT records |
 | SMTPListener  | 25    | TCP      | Email sending — logs credentials and message body |
@@ -302,7 +302,7 @@ argus/
 │   │   └── mod.rs           # WinDivert symmetric NAT + process identification
 │   └── listeners/
 │       ├── mod.rs           # Listener manager
-│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, forward mode
+│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, passthrough mode
 │       ├── dns.rs           # DNS query interception
 │       ├── smtp.rs          # SMTP email interception
 │       ├── ftp.rs           # FTP interception
@@ -342,11 +342,11 @@ Argus acts as a transparent TLS MITM proxy using a locally-generated CA:
 
 1. At startup, `configs/argus-ca.crt` and `configs/argus-ca.key` are loaded (or generated if absent). The CA is valid for one year; Argus warns if it is expired.
 2. For each incoming TLS connection, the SNI hostname from the `ClientHello` is used to generate a leaf certificate on the fly, signed by the CA. Leaf certificates are cached in memory per hostname.
-3. The TLS handshake completes with the leaf certificate. Argus decrypts the plaintext request, logs it, and returns a fake HTTP response (or forwards to the real server if the hostname matches a `Forward` rule).
+3. The TLS handshake completes with the leaf certificate. Argus decrypts the plaintext request, logs it, and returns a fake HTTP response (or passes through to the real server if the hostname matches a `Passthrough` rule).
 
-### Selective forwarding
+### Selective passthrough
 
-When a connection matches the `Forward` list, the listener acts as a transparent TCP proxy (`tokio::io::copy_bidirectional`) to the real destination. Argus's own outbound connections are recognised by PID and bypass the WinDivert filter, preventing redirect loops.
+When a connection matches the `Passthrough` list, the listener acts as a transparent TCP proxy (`tokio::io::copy_bidirectional`) to the real destination. Argus's own outbound connections are recognised by PID and bypass the WinDivert filter, preventing redirect loops.
 
 ## Building
 
