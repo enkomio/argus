@@ -1,2 +1,30 @@
+# Rust build artifacts
 /target
+
+# Captured network traffic
+/capture
+
+# Runtime logs
+*.txt
+*.log
+
+# Generated TLS certificates and keys
+/configs/*.crt
+/configs/*.key
+/configs/*.pem
+/configs/*.der
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code
 /.claude
