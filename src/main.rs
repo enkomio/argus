@@ -5,6 +5,7 @@ mod conn_table;
 mod listeners;
 mod diverter;
 mod logger;
+mod request_logger;
 
 use anyhow::Result;
 use clap::Parser;
@@ -83,6 +84,10 @@ struct Args {
     /// List available listeners
     #[arg(long = "list-listeners")]
     list_listeners: bool,
+
+    /// Directory where received-request log files are saved (default: current directory)
+    #[arg(long = "log-dir")]
+    log_dir: Option<String>,
 }
 
 fn print_banner() {
@@ -144,9 +149,14 @@ async fn main() -> Result<()> {
     // Shared connection table — written by the diverter, read by listeners.
     let conn_table = conn_table::new_shared_table();
 
+    let log_dir = args.log_dir.as_deref().unwrap_or("capture");
+    info!("Request logging → {}", log_dir);
+    let request_logger: Option<crate::request_logger::SharedRequestLogger> =
+        Some(request_logger::new_request_logger(log_dir));
+
     // Create listener manager
     let manager = Arc::new(Mutex::new(
-        ListenerManager::new(config.clone(), bind_addr, conn_table.clone()).await?
+        ListenerManager::new(config.clone(), bind_addr, conn_table.clone(), request_logger).await?
     ));
 
     // Start all listeners

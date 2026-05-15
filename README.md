@@ -1,4 +1,4 @@
-# Argus 🦀
+# Argus
 
 A Windows network traffic interception tool for malware analysis, written in Rust.
 
@@ -8,9 +8,13 @@ Argus intercepts all outgoing network traffic from a system and responds with fa
 
 Key capabilities:
 - **Automatic traffic redirection** — WinDivert rewrites packet destinations at kernel level; no manual DNS or proxy configuration needed
-- **Protocol-aware listeners** — HTTP, DNS, SMTP, FTP, IRC, POP3, raw TCP/UDP
+- **Protocol-aware listeners** — HTTP/HTTPS, DNS, SMTP, FTP, IRC, POP3, raw TCP/UDP
+- **Per-host HTTPS interception** — automatic CA generation with dynamic per-hostname leaf certificates (mitmproxy-style); install the CA once and all TLS traffic is decryptable
 - **Process identification** — every intercepted connection is attributed to the originating process name and PID
 - **Selective forwarding** — chosen processes, IPs, domains, or URL patterns are forwarded transparently to the real destination instead of receiving a fake response
+- **Selective logging suppression** — `NoLog` entries exclude matching connections from capture files
+- **Request/response capture** — every intercepted transaction is saved to disk under `capture/<process>/<pid>/<protocol>/`
+- **Customisable fake responses** — drop files into `default_files/` to serve custom content per path; built-in fallback if the directory or file is absent
 
 ## Requirements
 
@@ -38,6 +42,9 @@ Argus requires an elevated terminal or UAC prompt (the embedded manifest request
 # Write log output to file
 .\target\release\argus.exe -l argus.log
 
+# Override capture directory (default: capture\)
+.\target\release\argus.exe --log-dir D:\analysis\run1
+
 # List available listener types
 .\target\release\argus.exe --list-listeners
 ```
@@ -53,20 +60,79 @@ Edit `configs\default.ini` to enable/disable listeners and customise responses.
 DivertTraffic: Yes          # Enable WinDivert automatic traffic redirection
 ```
 
-### Listener example — HTTP
+### Listener example — HTTP / HTTPS
 
 ```ini
-[HTTPListener80]
+[HTTPListener]
 Enabled: True
 Listener: HTTPListener
 Port: 80
 Protocol: TCP
+UseSSL: No
 Timeout: 10
-DumpHTTPPosts: Yes
 
-# Optional: forward matching connections to the real destination
-# instead of returning a fake response.
+[HTTPSListener]
+Enabled: True
+Listener: HTTPListener
+Port: 443
+Protocol: TCP
+UseSSL: Yes
+Timeout: 10
+
+# Optional: forward matching connections to the real destination.
 # Forward: curl.exe, 1234, 93.184.216.34, example\.com, http://evil\.com/payload
+
+# Optional: suppress capture files for matching connections.
+# NoLog: curl.exe, 1234, 93.184.216.34, analytics\.example\.com
+```
+
+### HTTPS interception (MITM)
+
+On first run, Argus generates a CA key pair in `configs/`:
+
+```
+configs/
+├── argus-ca.crt   ← install this in Windows Certificate Store (Trusted Root CAs)
+└── argus-ca.key   ← private key — keep secret
+```
+
+For each TLS connection, Argus dynamically generates a leaf certificate for the requested hostname, signed by the CA. Once the CA is trusted by the OS, browsers and HTTP clients accept the leaf certificates without errors.
+
+**Installing the CA on Windows:**
+
+```powershell
+certutil -addstore -f "Root" configs\argus-ca.crt
+```
+
+**Removing the CA:**
+
+```
+certmgr.msc → Trusted Root Certification Authorities → Certificates → right-click "Argus CA" → Delete
+```
+
+The CA certificate expires after one year. Argus warns at startup if the loaded CA is expired.
+
+### Customising fake HTTP responses
+
+The HTTP listener looks for files in the `default_files/` directory before falling back to the built-in response.
+
+Resolution order for each incoming request:
+
+| Priority | Path tried | Example for `GET /login.html` |
+|----------|-----------|-------------------------------|
+| 1 | `default_files/{uri}` | `default_files/login.html` |
+| 2 | `default_files/index.html` | generic HTML fallback |
+| 3 | Built-in constant | always available |
+
+Place any file in `default_files/` and it will be served automatically when the URI matches. The URI path is sanitised before use (leading `/` stripped, `..` components removed) to prevent directory traversal.
+
+```
+default_files/
+├── index.html        ← served for "/" and any unmatched HTML request
+├── login.html        ← served for "/login.html"
+├── api/
+│   └── status.json   ← served for "/api/status.json"
+└── update.exe        ← served for "/update.exe"
 ```
 
 ### Listener example — DNS
@@ -81,6 +147,67 @@ ResponseA: 127.0.0.1        # IP returned for A queries
 ResponseMX: mail.argus.local
 ResponseTXT: ARGUS
 ```
+
+Supported record types: `A`, `AAAA` (returns `::1`), `MX`, `TXT`. Any other query type receives an `A` record fallback.
+
+### Listener example — SMTP / FTP / POP3
+
+```ini
+[SMTPListener]
+Enabled: True
+Listener: SMTPListener
+Port: 25
+Protocol: TCP
+Banner: 220 argus.local SMTP Service Ready
+
+[FTPListener]
+Enabled: True
+Listener: FTPListener
+Port: 21
+Protocol: TCP
+Banner: 220 Argus FTP Server
+
+[POPListener]
+Enabled: True
+Listener: POPListener
+Port: 110
+Protocol: TCP
+Banner: +OK Argus POP3 Server Ready
+```
+
+Each listener logs credentials (USER/PASS) and protocol commands, and replies with plausible success responses to keep the malware running.
+
+### Listener example — IRC
+
+```ini
+[IRCListener]
+Enabled: True
+Listener: IRCListener
+Port: 6667
+Protocol: TCP
+```
+
+Handles `NICK`, `USER`, `JOIN`, `PRIVMSG`, `PING/PONG`, `MODE`, `WHO`, `WHOIS`, `NAMES`, and `QUIT`. Logs all channel joins and messages — commonly used C2 channels are captured transparently.
+
+### Listener example — Raw TCP/UDP
+
+```ini
+[RawTCPListener]
+Enabled: True
+Listener: RawListener
+Port: 1337
+Protocol: TCP
+Timeout: 5
+
+[RawUDPListener]
+Enabled: True
+Listener: RawListener
+Port: 1338
+Protocol: UDP
+Timeout: 5
+```
+
+Accepts any traffic, echoes it back, and logs a hex dump of up to 256 bytes per packet. Used as the default catch-all for ports with no dedicated listener.
 
 ### Selective forwarding
 
@@ -118,18 +245,48 @@ When a connection is forwarded:
 
 Argus's own outbound connections (created during forwarding) are automatically excluded from WinDivert interception to prevent redirect loops.
 
+### Selective logging suppression
+
+The `NoLog` key uses the same entry format as `Forward`. Matching connections are not written to capture files (they are still logged to the console/log file at `info` level).
+
+```ini
+NoLog: analytics\.example\.com, telemetry\.microsoft\.com
+```
+
+## Request/response capture
+
+Every intercepted transaction is saved to disk. The directory layout is:
+
+```
+capture/
+└── <process_name>/
+    └── <pid>/
+        └── <protocol>/
+            ├── 20260515_143201_0001_req.log
+            ├── 20260515_143201_0001_rsp.log
+            ├── 20260515_143205_0002_req.log
+            └── ...
+```
+
+- **`<process_name>`** — sanitised executable name (e.g. `malware.exe`)
+- **`<pid>`** — numeric PID; a new subdirectory is created if the process restarts
+- **`<protocol>`** — `http`, `https`, `smtp`, `ftp`, `irc`, `pop`, `dns`, `raw`
+- **filename** — `<yyyymmdd>_<HHMMSS>_<NNNN>_<req|rsp>.log` where `NNNN` is a per-PID transaction counter
+
+The default capture directory is `capture\` relative to the working directory. Override with `--log-dir`.
+
 ## Listeners
 
-| Listener      | Port  | Protocol | Description                              |
-|---------------|-------|----------|------------------------------------------|
-| HTTPListener  | 80    | TCP      | HTTP traffic — serves fake HTML/XML      |
-| HTTPSListener | 443   | TCP      | HTTPS — SSL passthrough or fake response |
-| DNSListener   | 53    | UDP      | DNS queries → configurable fake records  |
-| SMTPListener  | 25    | TCP      | Email sending — logs credentials         |
-| FTPListener   | 21    | TCP      | FTP — logs credentials and file ops      |
-| IRCListener   | 6667  | TCP      | IRC C2 channels                          |
-| POPListener   | 110   | TCP      | POP3 email retrieval                     |
-| RawListener   | 1337  | TCP/UDP  | Any other port — hexdump logging         |
+| Listener      | Port  | Protocol | Description                                    |
+|---------------|-------|----------|------------------------------------------------|
+| HTTPListener  | 80    | TCP      | HTTP — serves fake HTML/files, forwards on match |
+| HTTPSListener | 443   | TCP      | HTTPS — per-host MITM certs, decrypted capture |
+| DNSListener   | 53    | UDP      | DNS queries → configurable A/AAAA/MX/TXT records |
+| SMTPListener  | 25    | TCP      | Email sending — logs credentials and message body |
+| FTPListener   | 21    | TCP      | FTP — logs credentials and file operations     |
+| IRCListener   | 6667  | TCP      | IRC C2 channels — logs joins and messages      |
+| POPListener   | 110   | TCP      | POP3 email retrieval — logs credentials        |
+| RawListener   | any   | TCP/UDP  | Catch-all — hex dump logging, echo response    |
 
 ## Architecture
 
@@ -139,12 +296,13 @@ argus/
 │   ├── main.rs              # Entry point, CLI, admin check, startup
 │   ├── config.rs            # INI config parser
 │   ├── conn_table.rs        # Shared connection table (diverter → listeners)
-│   ├── logger.rs            # Logging setup (tracing)
+│   ├── logger.rs            # tracing setup (terminal + optional file)
+│   ├── request_logger.rs    # Per-transaction capture file writer
 │   ├── diverter/
 │   │   └── mod.rs           # WinDivert symmetric NAT + process identification
 │   └── listeners/
 │       ├── mod.rs           # Listener manager
-│       ├── http.rs          # HTTP/HTTPS interception + forward mode
+│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, forward mode
 │       ├── dns.rs           # DNS query interception
 │       ├── smtp.rs          # SMTP email interception
 │       ├── ftp.rs           # FTP interception
@@ -153,6 +311,8 @@ argus/
 │       └── raw.rs           # Raw TCP/UDP fallback
 ├── configs/
 │   └── default.ini          # Default configuration
+├── default_files/
+│   └── index.html           # Default HTTP fake response (customisable)
 ├── Cargo.toml
 ├── build.rs                 # WinDivert linker setup + UAC manifest embedding
 └── README.md
@@ -176,9 +336,13 @@ This symmetric approach ensures the TCP three-way handshake completes correctly 
 
 For every **new** connection, Argus calls `GetExtendedTcpTable` / `GetExtendedUdpTable` to map the client source port to a PID, then `QueryFullProcessImageNameW` to resolve the executable name. This information is stored in the shared connection table and logged alongside the intercepted traffic.
 
-### Listeners
+### HTTPS interception
 
-Each listener is a Tokio async task that binds to a port and speaks the relevant protocol. Intercepted connections arrive from `127.0.0.1` (loopback) because of the symmetric NAT. Listeners read the original destination from the shared connection table to support selective forwarding.
+Argus acts as a transparent TLS MITM proxy using a locally-generated CA:
+
+1. At startup, `configs/argus-ca.crt` and `configs/argus-ca.key` are loaded (or generated if absent). The CA is valid for one year; Argus warns if it is expired.
+2. For each incoming TLS connection, the SNI hostname from the `ClientHello` is used to generate a leaf certificate on the fly, signed by the CA. Leaf certificates are cached in memory per hostname.
+3. The TLS handshake completes with the leaf certificate. Argus decrypts the plaintext request, logs it, and returns a fake HTTP response (or forwards to the real server if the hostname matches a `Forward` rule).
 
 ### Selective forwarding
 

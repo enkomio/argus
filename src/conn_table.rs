@@ -139,3 +139,38 @@ pub type SharedConnTable = Arc<RwLock<HashMap<u16, ConnInfo>>>;
 pub fn new_shared_table() -> SharedConnTable {
     Arc::new(RwLock::new(HashMap::new()))
 }
+
+/// Returns `true` when the connection on `port` matches any entry in `no_log`,
+/// meaning log files should **not** be written for this connection.
+///
+/// Uses the same matching logic as [`ConnInfo::matches_forward_list`]:
+/// process-name regex, PID, IPv4, and IPv6.  Returns `false` when `no_log`
+/// is empty, when no conn-table entry exists for `port`, or when nothing
+/// matches.
+pub fn should_skip_log(table: &SharedConnTable, port: u16, no_log: &[String]) -> bool {
+    if no_log.is_empty() {
+        return false;
+    }
+    table
+        .read()
+        .ok()
+        .and_then(|tbl| tbl.get(&port).map(|info| info.matches_forward_list(no_log)))
+        .unwrap_or(false)
+}
+
+/// Look up the `(pid, process_name)` pair for a connection identified by its
+/// **client source port**.  Returns `(0, "unknown")` when no entry is found.
+pub fn get_process_info(table: &SharedConnTable, port: u16) -> (u32, String) {
+    table
+        .read()
+        .ok()
+        .and_then(|tbl| {
+            tbl.get(&port).map(|info| (
+                info.pid.unwrap_or(0),
+                info.process_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ))
+        })
+        .unwrap_or((0, "unknown".to_string()))
+}

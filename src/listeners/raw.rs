@@ -4,11 +4,11 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{warn, debug};
-use chrono::Local;
-use colored::*;
+use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
+use crate::conn_table::SharedConnTable;
+use crate::request_logger::SharedRequestLogger;
 
 fn hexdump(data: &[u8]) -> Vec<String> {
     let mut lines = Vec::new();
@@ -23,25 +23,13 @@ fn hexdump(data: &[u8]) -> Vec<String> {
 }
 
 fn log_raw(data: &[u8], src_addr: &SocketAddr, config: &ListenerConfig, proto: &str) {
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!(
-        "{} {} {} {} {} {} bytes",
-        format!("[{}]", timestamp).dimmed(),
-        proto.bright_red().bold(),
-        format!("[{}]", config.name).bright_magenta(),
-        format!("{}", src_addr).yellow(),
-        "→".dimmed(),
-        data.len().to_string().bright_white()
-    );
-
-    // Show up to first 256 bytes as hexdump
+    info!("{} [{}] {} -> {} bytes", proto, config.name, src_addr, data.len());
     let dump_data = if data.len() > 256 { &data[..256] } else { data };
     for line in hexdump(dump_data) {
-        println!("             {}", line.dimmed());
+        info!("    {}", line);
     }
-
     if data.len() > 256 {
-        println!("             {} ({} more bytes)", "...".dimmed(), data.len() - 256);
+        info!("    ... ({} more bytes)", data.len() - 256);
     }
 }
 
@@ -49,9 +37,22 @@ async fn handle_tcp_connection(
     mut stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     config: ListenerConfig,
+    conn_table: SharedConnTable,
+    request_logger: Option<SharedRequestLogger>,
 ) -> Result<()> {
+    let should_log = !crate::conn_table::should_skip_log(
+        &conn_table, src_addr.port(), &config.no_log,
+    );
+    let (log_pid, log_name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+    let log_counter = if should_log {
+        request_logger.as_ref().map(|l| l.alloc_counter(log_pid)).unwrap_or(0)
+    } else {
+        0
+    };
     let timeout = tokio::time::Duration::from_secs(config.timeout);
     let mut buf = vec![0u8; 4096];
+    let mut req_transcript:  Vec<u8> = Vec::new();
+    let mut resp_transcript: Vec<u8> = Vec::new();
 
     loop {
         let n = match tokio::time::timeout(timeout, stream.read(&mut buf)).await {
@@ -68,6 +69,7 @@ async fn handle_tcp_connection(
         };
 
         let data = &buf[..n];
+        req_transcript.extend_from_slice(data);
         log_raw(data, &src_addr, &config, "RAW-TCP");
 
         // Echo back
@@ -75,12 +77,28 @@ async fn handle_tcp_connection(
             debug!("Write error to {}: {}", src_addr, e);
             break;
         }
+        resp_transcript.extend_from_slice(data);
+    }
+
+    if should_log {
+        if let Some(ref logger) = request_logger {
+            if !req_transcript.is_empty() {
+                if let Err(e) = logger.log(log_pid, &log_name, "raw", log_counter, "req", &req_transcript) {
+                    debug!("Request log write failed: {}", e);
+                }
+            }
+            if !resp_transcript.is_empty() {
+                if let Err(e) = logger.log(log_pid, &log_name, "raw", log_counter, "rsp", &resp_transcript) {
+                    debug!("Response log write failed: {}", e);
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
-pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
+pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
     let addr = format!("{}:{}", bind_addr, config.port);
 
     if config.protocol.to_lowercase() == "tcp" {
@@ -93,8 +111,10 @@ pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
             match listener.accept().await {
                 Ok((stream, src_addr)) => {
                     let cfg = config.clone();
+                    let ct = conn_table.clone();
+                    let rl = request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_tcp_connection(stream, src_addr, cfg).await {
+                        if let Err(e) = handle_tcp_connection(stream, src_addr, cfg, ct, rl).await {
                             debug!("Raw TCP error: {}", e);
                         }
                     });
@@ -115,7 +135,26 @@ pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
                 Ok((n, src_addr)) => {
                     let data = buf[..n].to_vec();
                     log_raw(&data, &src_addr, &config, "RAW-UDP");
+
+                    // Echo back
                     let _ = socket.send_to(&data, src_addr).await;
+
+                    // Log request and echoed response
+                    let udp_should_log = !crate::conn_table::should_skip_log(
+                        &conn_table, src_addr.port(), &config.no_log,
+                    );
+                    if udp_should_log {
+                        if let Some(ref logger) = request_logger {
+                            let (pid, name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+                            let counter = logger.alloc_counter(pid);
+                            if let Err(e) = logger.log(pid, &name, "raw", counter, "req", &data) {
+                                debug!("Request log write failed: {}", e);
+                            }
+                            if let Err(e) = logger.log(pid, &name, "raw", counter, "rsp", &data) {
+                                debug!("Response log write failed: {}", e);
+                            }
+                        }
+                    }
                 }
                 Err(e) => warn!("UDP recv error: {}", e),
             }

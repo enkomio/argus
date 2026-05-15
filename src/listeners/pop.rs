@@ -4,23 +4,22 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{warn, debug};
-use chrono::Local;
-use colored::*;
+use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
+use crate::conn_table::SharedConnTable;
+use crate::request_logger::SharedRequestLogger;
 
 fn log_pop(event: &str, detail: &str, src_addr: &SocketAddr, config: &ListenerConfig) {
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!(
-        "{} {} {} {} {} {}",
-        format!("[{}]", timestamp).dimmed(),
-        "POP3".bright_green().bold(),
-        format!("[{}]", config.name).bright_magenta(),
-        format!("{}", src_addr).yellow(),
-        event.bright_white().bold(),
-        detail.bright_cyan()
-    );
+    info!("POP3 [{}] {} {} {}", config.name, src_addr, event, detail);
+}
+
+/// Write `data` to `writer`, also appending it to `resp`.
+macro_rules! send {
+    ($writer:expr, $resp:expr, $data:expr) => {{
+        $resp.extend_from_slice($data);
+        $writer.write_all($data).await?
+    }};
 }
 
 const FAKE_EMAIL: &str = "From: admin@argus.local\r\n\
@@ -33,12 +32,27 @@ async fn handle_pop(
     stream: tokio::net::TcpStream,
     src_addr: SocketAddr,
     config: ListenerConfig,
+    conn_table: SharedConnTable,
+    request_logger: Option<SharedRequestLogger>,
 ) -> Result<()> {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
 
+    let should_log = !crate::conn_table::should_skip_log(
+        &conn_table, src_addr.port(), &config.no_log,
+    );
+    let (log_pid, log_name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+    let log_counter = if should_log {
+        request_logger.as_ref().map(|l| l.alloc_counter(log_pid)).unwrap_or(0)
+    } else {
+        0
+    };
+    let mut req_transcript:  Vec<u8> = Vec::new();
+    let mut resp_transcript: Vec<u8> = Vec::new();
+
     let banner = config.banner.as_deref().unwrap_or("+OK Argus POP3 Server Ready");
-    writer.write_all(format!("{}\r\n", banner).as_bytes()).await?;
+    let banner_line = format!("{}\r\n", banner);
+    send!(writer, resp_transcript, banner_line.as_bytes());
 
     let mut line = String::new();
     let mut authenticated = false;
@@ -50,6 +64,7 @@ async fn handle_pop(
         if n == 0 {
             break;
         }
+        req_transcript.extend_from_slice(line.as_bytes());
 
         let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
         let cmd = parts[0].to_uppercase();
@@ -59,54 +74,70 @@ async fn handle_pop(
             "USER" => {
                 username = arg.to_string();
                 log_pop("USER", &username, &src_addr, &config);
-                writer.write_all(b"+OK User accepted\r\n").await?;
+                send!(writer, resp_transcript, b"+OK User accepted\r\n");
             }
             "PASS" => {
                 log_pop("PASS", &format!("user={} pass={}", username, arg), &src_addr, &config);
                 authenticated = true;
-                writer.write_all(b"+OK Maildrop ready, 1 message\r\n").await?;
+                send!(writer, resp_transcript, b"+OK Maildrop ready, 1 message\r\n");
             }
             "STAT" => {
                 if authenticated {
-                    let size = FAKE_EMAIL.len();
-                    writer.write_all(format!("+OK 1 {}\r\n", size).as_bytes()).await?;
+                    let msg = format!("+OK 1 {}\r\n", FAKE_EMAIL.len());
+                    send!(writer, resp_transcript, msg.as_bytes());
                 } else {
-                    writer.write_all(b"-ERR Not authenticated\r\n").await?;
+                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
                 }
             }
             "LIST" => {
                 if authenticated {
-                    let size = FAKE_EMAIL.len();
-                    writer.write_all(format!("+OK 1 message\r\n1 {}\r\n.\r\n", size).as_bytes()).await?;
+                    let msg = format!("+OK 1 message\r\n1 {}\r\n.\r\n", FAKE_EMAIL.len());
+                    send!(writer, resp_transcript, msg.as_bytes());
                 } else {
-                    writer.write_all(b"-ERR Not authenticated\r\n").await?;
+                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
                 }
             }
             "RETR" => {
                 log_pop("RETR", arg, &src_addr, &config);
                 if authenticated {
-                    writer.write_all(format!("+OK {} octets\r\n{}\r\n.\r\n", FAKE_EMAIL.len(), FAKE_EMAIL).as_bytes()).await?;
+                    let msg = format!("+OK {} octets\r\n{}\r\n.\r\n", FAKE_EMAIL.len(), FAKE_EMAIL);
+                    send!(writer, resp_transcript, msg.as_bytes());
                 } else {
-                    writer.write_all(b"-ERR Not authenticated\r\n").await?;
+                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
                 }
             }
             "DELE" => {
-                writer.write_all(b"+OK Message deleted\r\n").await?;
+                send!(writer, resp_transcript, b"+OK Message deleted\r\n");
             }
             "NOOP" => {
-                writer.write_all(b"+OK\r\n").await?;
+                send!(writer, resp_transcript, b"+OK\r\n");
             }
             "RSET" => {
-                writer.write_all(b"+OK\r\n").await?;
+                send!(writer, resp_transcript, b"+OK\r\n");
             }
             "QUIT" => {
                 log_pop("QUIT", "", &src_addr, &config);
-                writer.write_all(b"+OK Goodbye\r\n").await?;
+                send!(writer, resp_transcript, b"+OK Goodbye\r\n");
                 break;
             }
             _ => {
                 debug!("Unknown POP3 command: {}", cmd);
-                writer.write_all(b"-ERR Unknown command\r\n").await?;
+                send!(writer, resp_transcript, b"-ERR Unknown command\r\n");
+            }
+        }
+    }
+
+    if should_log {
+        if let Some(ref logger) = request_logger {
+            if !req_transcript.is_empty() {
+                if let Err(e) = logger.log(log_pid, &log_name, "pop", log_counter, "req", &req_transcript) {
+                    debug!("Request log write failed: {}", e);
+                }
+            }
+            if !resp_transcript.is_empty() {
+                if let Err(e) = logger.log(log_pid, &log_name, "pop", log_counter, "rsp", &resp_transcript) {
+                    debug!("Response log write failed: {}", e);
+                }
             }
         }
     }
@@ -114,7 +145,7 @@ async fn handle_pop(
     Ok(())
 }
 
-pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
+pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
     let addr = format!("{}:{}", bind_addr, config.port);
     let listener = TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("Failed to bind POP3 on {}: {}", addr, e))?;
@@ -125,8 +156,10 @@ pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
         match listener.accept().await {
             Ok((stream, src_addr)) => {
                 let cfg = config.clone();
+                let ct = conn_table.clone();
+                let rl = request_logger.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_pop(stream, src_addr, cfg).await {
+                    if let Err(e) = handle_pop(stream, src_addr, cfg, ct, rl).await {
                         debug!("POP3 error: {}", e);
                     }
                 });

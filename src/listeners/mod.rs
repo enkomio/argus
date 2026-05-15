@@ -15,12 +15,14 @@ use colored::*;
 
 use crate::config::{ArgusConfig, ListenerConfig};
 use crate::conn_table::SharedConnTable;
+use crate::request_logger::SharedRequestLogger;
 
 pub struct ListenerManager {
     config: Arc<ArgusConfig>,
     bind_addr: String,
     handles: Vec<tokio::task::JoinHandle<()>>,
     conn_table: SharedConnTable,
+    request_logger: Option<SharedRequestLogger>,
 }
 
 impl ListenerManager {
@@ -28,12 +30,14 @@ impl ListenerManager {
         config: Arc<ArgusConfig>,
         bind_addr: String,
         conn_table: SharedConnTable,
+        request_logger: Option<SharedRequestLogger>,
     ) -> Result<Self> {
         Ok(Self {
             config,
             bind_addr,
             handles: Vec::new(),
             conn_table,
+            request_logger,
         })
     }
 
@@ -65,8 +69,9 @@ impl ListenerManager {
                         if cfg.use_ssl { "/SSL".bright_yellow().to_string() } else { String::new() }
                     );
                     let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = http::start(cfg, bind, ct).await {
+                        if let Err(e) = http::start(cfg, bind, ct, rl).await {
                             error!("HTTPListener error: {}", e);
                         }
                     })
@@ -80,8 +85,10 @@ impl ListenerManager {
                         cfg.port,
                         cfg.protocol.to_uppercase().bright_cyan()
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = dns::start(cfg, bind).await {
+                        if let Err(e) = dns::start(cfg, bind, ct, rl).await {
                             error!("DNSListener error: {}", e);
                         }
                     })
@@ -94,8 +101,10 @@ impl ListenerManager {
                         bind,
                         cfg.port
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = smtp::start(cfg, bind).await {
+                        if let Err(e) = smtp::start(cfg, bind, ct, rl).await {
                             error!("SMTPListener error: {}", e);
                         }
                     })
@@ -108,8 +117,10 @@ impl ListenerManager {
                         bind,
                         cfg.port
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = ftp::start(cfg, bind).await {
+                        if let Err(e) = ftp::start(cfg, bind, ct, rl).await {
                             error!("FTPListener error: {}", e);
                         }
                     })
@@ -122,8 +133,10 @@ impl ListenerManager {
                         bind,
                         cfg.port
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = irc::start(cfg, bind).await {
+                        if let Err(e) = irc::start(cfg, bind, ct, rl).await {
                             error!("IRCListener error: {}", e);
                         }
                     })
@@ -136,8 +149,10 @@ impl ListenerManager {
                         bind,
                         cfg.port
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = pop::start(cfg, bind).await {
+                        if let Err(e) = pop::start(cfg, bind, ct, rl).await {
                             error!("POPListener error: {}", e);
                         }
                     })
@@ -151,8 +166,10 @@ impl ListenerManager {
                         cfg.port,
                         cfg.protocol.to_uppercase().bright_cyan()
                     );
+                    let ct = self.conn_table.clone();
+                    let rl = self.request_logger.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = raw::start(cfg, bind).await {
+                        if let Err(e) = raw::start(cfg, bind, ct, rl).await {
                             error!("RawListener error: {}", e);
                         }
                     })

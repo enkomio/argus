@@ -1,13 +1,13 @@
-//! DNS listener — intercepts DNS queries and returns fake responses
+//! DNS listener â€” intercepts DNS queries and returns fake responses
 
 use anyhow::Result;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
-use tracing::{info, warn, debug, error};
-use chrono::Local;
-use colored::*;
+use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
+use crate::conn_table::SharedConnTable;
+use crate::request_logger::SharedRequestLogger;
 
 // DNS constants
 const DNS_QR_RESPONSE: u16 = 0x8000;
@@ -260,23 +260,11 @@ fn qtype_to_str(qtype: u16) -> &'static str {
 }
 
 fn log_dns_query(question: &DnsQuestion, response_val: &str, src_addr: &SocketAddr, config: &ListenerConfig) {
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!(
-        "{} {} {} {} {} {} {} {} {}",
-        format!("[{}]", timestamp).dimmed(),
-        "DNS ".bright_blue().bold(),
-        format!("[{}]", config.name).bright_magenta(),
-        format!("{}", src_addr).yellow(),
-        "→".dimmed(),
-        qtype_to_str(question.qtype).bright_cyan(),
-        question.name.bright_white().bold(),
-        "→".dimmed(),
-        response_val.bright_green()
-    );
+    info!("DNS  [{}] {} -> {} {} -> {}", config.name, src_addr, qtype_to_str(question.qtype), question.name, response_val);
 }
 
 /// Start the DNS listener (UDP)
-pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
+pub async fn start(config: ListenerConfig, bind_addr: String, conn_table: SharedConnTable, request_logger: Option<SharedRequestLogger>) -> Result<()> {
     let addr = format!("{}:{}", bind_addr, config.port);
     let socket = UdpSocket::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("Failed to bind DNS listener on {}: {}", addr, e))?;
@@ -305,6 +293,31 @@ pub async fn start(config: ListenerConfig, bind_addr: String) -> Result<()> {
                     }
 
                     let response = build_dns_response(&header, &questions, &cfg);
+
+                    let dns_should_log = !crate::conn_table::should_skip_log(
+                        &conn_table, src_addr.port(), &config.no_log,
+                    );
+                    if dns_should_log {
+                        if let Some(ref logger) = request_logger {
+                            let mut req_content = format!("DNS QUERY from {}\n", src_addr);
+                            for q in &questions {
+                                req_content.push_str(&format!(
+                                    "  {} {}\n",
+                                    qtype_to_str(q.qtype),
+                                    q.name
+                                ));
+                            }
+                            let (pid, name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+                            let counter = logger.alloc_counter(pid);
+                            if let Err(e) = logger.log(pid, &name, "dns", counter, "req", req_content.as_bytes()) {
+                                debug!("Request log write failed: {}", e);
+                            }
+                            if let Err(e) = logger.log(pid, &name, "dns", counter, "rsp", &response) {
+                                debug!("Response log write failed: {}", e);
+                            }
+                        }
+                    }
+
                     if let Err(e) = socket.send_to(&response, src_addr).await {
                         warn!("Failed to send DNS response: {}", e);
                     }

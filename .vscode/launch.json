@@ -6,7 +6,11 @@
             "request": "launch",
             "name": "Argus",
             "program": "${workspaceFolder}/target/debug/argus.exe",
-            "args": ["-c", "configs/default.ini", "-v"],
+            "args": [
+                "-c", "configs/default.ini", 
+                "--log", "logs.txt",
+                "--verbose",
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "cargo build (debug)",

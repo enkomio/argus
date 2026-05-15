@@ -44,8 +44,6 @@ pub struct ListenerConfig {
     pub response_txt: Option<String>,
     pub banner: Option<String>,
     pub custom_responses: HashMap<String, String>,
-    pub dump_http_posts: bool,
-    pub dump_http_posts_prefix: String,
     /// Process filter for forwarding.
     ///
     /// When non-empty, connections whose originating process matches one of
@@ -61,6 +59,16 @@ pub struct ListenerConfig {
     ///
     /// An empty or absent `Forward` key disables forwarding entirely.
     pub forward: Vec<String>,
+
+    /// Logging suppression filter.
+    ///
+    /// Accepts the same entry types as `Forward` (process name / regex, PID,
+    /// IPv4, IPv6, domain, domain+path, URL).  When a connection matches any
+    /// entry, request and response log files are **not** written for that
+    /// connection.  All other connections are logged normally.
+    ///
+    /// An empty or absent `NoLog` key means every connection is logged.
+    pub no_log: Vec<String>,
 }
 
 impl Default for ArgusConfig {
@@ -195,16 +203,17 @@ impl ArgusConfig {
                 response_txt: data.get("responsetxt").cloned(),
                 banner: data.get("banner").cloned(),
                 custom_responses: HashMap::new(),
-                dump_http_posts: data
-                    .get("dumphttpposts")
-                    .map(|v| v.to_lowercase() == "yes")
-                    .unwrap_or(false),
-                dump_http_posts_prefix: data
-                    .get("dumphttppostsfileprefix")
-                    .cloned()
-                    .unwrap_or("http".to_string()),
                 forward: data
                     .get("forward")
+                    .map(|v| {
+                        v.split(',')
+                         .map(|s| s.trim().to_string())
+                         .filter(|s| !s.is_empty())
+                         .collect()
+                    })
+                    .unwrap_or_default(),
+                no_log: data
+                    .get("nolog")
                     .map(|v| {
                         v.split(',')
                          .map(|s| s.trim().to_string())
@@ -241,9 +250,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: "http".to_string(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "HTTPSListener".to_string(),
@@ -259,9 +267,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: "https".to_string(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "DNSListener".to_string(),
@@ -277,9 +284,8 @@ impl ArgusConfig {
                 response_txt: Some("ARGUS".to_string()),
                 banner: None,
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "SMTPListener".to_string(),
@@ -295,9 +301,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("220 argus SMTP Service Ready".to_string()),
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "FTPListener".to_string(),
@@ -313,9 +318,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("220 Argus FTP Server".to_string()),
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "RawTCPListener".to_string(),
@@ -331,9 +335,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: None,
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "IRCListener".to_string(),
@@ -349,9 +352,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some(":argus 001 user :Welcome to Argus IRC".to_string()),
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
             ListenerConfig {
                 name: "POPListener".to_string(),
@@ -367,9 +369,8 @@ impl ArgusConfig {
                 response_txt: None,
                 banner: Some("+OK Argus POP3 Server Ready".to_string()),
                 custom_responses: HashMap::new(),
-                dump_http_posts: false,
-                dump_http_posts_prefix: String::new(),
                 forward: vec![],
+                no_log: vec![],
             },
         ]
     }
