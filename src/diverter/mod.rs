@@ -26,6 +26,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, warn};
+use windivert::layer;
 use windivert::prelude::*;
 use windivert_sys::ChecksumFlags;
 
@@ -44,38 +45,82 @@ struct ConnEntry {
     bypass: bool,
 }
 
-pub struct Diverter;
+pub struct Diverter {
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// Raw Windows HANDLE value of the WinDivert handle owned by the packet-loop
+    /// thread.  Stored here so `stop()` can call `WinDivertShutdown` to unblock
+    /// the thread's pending `recv()` without needing to own the handle itself.
+    /// `0` means no active handle (diverter not started).
+    raw_handle: isize,
+}
 
 impl Diverter {
-    pub fn new() -> Self { Self }
-
-    pub fn start(config: &ArgusConfig, conn_table: SharedConnTable) -> Result<()> {
+    pub fn start(config: &ArgusConfig, conn_table: SharedConnTable) -> Result<Self> {
         let filter = build_filter(config);
 
         if filter.is_empty() {
             info!("Diverter: no enabled listeners — skipping traffic redirection.");
-            return Ok(());
+            return Ok(Self { thread: None, raw_handle: 0 });
         }
 
         info!("Diverter filter: {}", filter);
 
         let handle = WinDivert::network(&filter, 0i16, WinDivertFlags::new())
-            .with_context(|| {
-                "Failed to open WinDivert handle.\n\
+            .with_context(|| format!(
+                "Failed to open WinDivert handle (filter: `{filter}`).\n\
                  Ensure that:\n  \
                  \u{2022} Argus is running as Administrator\n  \
-                 \u{2022} WinDivert64.dll and WinDivert64.sys are in the same folder as argus.exe"
-            })?;
+                 \u{2022} WinDivert.dll and WinDivert64.sys are in the same folder as argus.exe"
+            ))?;
+
+        // Extract the raw HANDLE value before moving `handle` into the thread.
+        // WinDivert<L> stores `handle: windows::HANDLE` as its first field;
+        // HANDLE is repr(transparent) over isize, so the first isize of the struct
+        // IS the handle value.  We store it for use in stop().
+        let raw_handle: isize = unsafe {
+            std::ptr::read(
+                &handle as *const WinDivert<layer::NetworkLayer> as *const isize,
+            )
+        };
 
         info!("Diverter: active — full bidirectional NAT enabled");
 
         let port_maps = PortMaps::from_config(config);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("argus-diverter".to_string())
             .spawn(move || packet_loop(handle, conn_table, port_maps))
             .context("Failed to spawn diverter thread")?;
 
-        Ok(())
+        Ok(Self { thread: Some(thread), raw_handle })
+    }
+
+    /// Stop the diverter gracefully.
+    ///
+    /// Sequence:
+    ///  1. `WinDivertShutdown(RECV)` — unblocks the thread's pending `recv()`.
+    ///  2. Join the thread — the WinDivert handle is dropped here (`WinDivertClose`).
+    ///
+    /// WinDivert 2.x automatically unregisters its SCM service when the last
+    /// handle is closed, so no explicit `uninstall()` call is needed.
+    pub fn stop(mut self) {
+        if self.raw_handle == 0 {
+            return;
+        }
+        info!("Diverter: stopping...");
+
+        // Unblock the thread's pending recv().
+        unsafe {
+            use windows::Win32::Foundation::HANDLE;
+            windivert_sys::WinDivertShutdown(HANDLE(self.raw_handle), WinDivertShutdownMode::Recv);
+        }
+
+        // Wait for the thread to exit; its WinDivert handle is dropped here,
+        // which calls WinDivertClose and triggers the driver's auto-unload.
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+
+        info!("Diverter: unloaded.");
     }
 }
 

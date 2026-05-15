@@ -17,6 +17,8 @@ use tracing::{info, warn, error};
 use config::ArgusConfig;
 use listeners::ListenerManager;
 
+const VERSION:&str = "1.0.0" ;
+
 /// Checks whether the current process is running with Administrator privileges.
 /// If not, prints a clear error message and exits with code 1.
 fn require_admin() {
@@ -98,8 +100,7 @@ fn print_banner() {
  / ___ \|  _ < | |_| | |_| |___) |
 /_/   \_\_| \_\ \____|\___/ |____/
 "#.bright_cyan());
-    println!("{}", "  Network traffic interception tool for malware analysis".bright_yellow());
-    println!("{}", "  Network traffic interception tool for malware analysis  |  v1.0.0".bright_white());
+    println!("{}", format!("  Network traffic interception tool for malware analysis  |  v{VERSION}").bright_white());
     println!();
 }
 
@@ -166,19 +167,29 @@ async fn main() -> Result<()> {
     }
 
     // Start traffic diverter (requires Administrator + WinDivert driver)
-    if config.argus.divert_traffic {
-        if let Err(e) = diverter::Diverter::start(&config, conn_table.clone()) {
-            error!("Diverter failed to start: {}", e);
-            warn!("Traffic will NOT be redirected automatically.");
-            warn!("You can still point malware to this machine's IP manually.");
+    let diverter: Option<diverter::Diverter> = if config.argus.divert_traffic {
+        match diverter::Diverter::start(&config, conn_table.clone()) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                error!("Diverter failed to start: {:#}", e);
+                warn!("Traffic will NOT be redirected automatically.");
+                warn!("You can still point malware to this machine's IP manually.");
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     println!();
     println!("{}", "═".repeat(60).bright_cyan());
     println!("{}", "  Argus is running. Press Ctrl+C to stop.".bright_green().bold());
     println!("{}", "═".repeat(60).bright_cyan());
     println!();
+
+    // Wrap diverter in Arc<Mutex> so it can be moved into the ctrlc handler.
+    let diverter_arc = Arc::new(std::sync::Mutex::new(diverter));
+    let diverter_clone = diverter_arc.clone();
 
     // Setup graceful shutdown
     let manager_clone = manager.clone();
@@ -190,6 +201,9 @@ async fn main() -> Result<()> {
             let mut mgr = manager_clone.lock().await;
             mgr.stop_all().await;
         });
+        if let Some(d) = diverter_clone.lock().unwrap().take() {
+            d.stop();
+        }
         std::process::exit(0);
     })?;
 

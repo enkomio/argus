@@ -4,8 +4,6 @@ pub mod http;
 pub mod dns;
 pub mod raw;
 pub mod smtp;
-pub mod ftp;
-pub mod irc;
 pub mod pop;
 
 use anyhow::Result;
@@ -121,48 +119,6 @@ impl ListenerManager {
                     tokio::spawn(async move {
                         if let Err(e) = smtp::start(cfg, bind, ct, rl).await {
                             error!("SMTPListener error: {}", e);
-                        }
-                    })
-                }
-                "FTPListener" => {
-                    let port_str = if cfg.listener_port != cfg.service_port {
-                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
-                    } else {
-                        cfg.listener_port.to_string()
-                    };
-                    println!(
-                        "  {} {} on {}:{} [TCP]",
-                        "●".bright_green(),
-                        cfg.name.bright_white().bold(),
-                        bind,
-                        port_str
-                    );
-                    let ct = self.conn_table.clone();
-                    let rl = self.request_logger.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = ftp::start(cfg, bind, ct, rl).await {
-                            error!("FTPListener error: {}", e);
-                        }
-                    })
-                }
-                "IRCListener" => {
-                    let port_str = if cfg.listener_port != cfg.service_port {
-                        format!("{} (intercepts :{})", cfg.listener_port, cfg.service_port)
-                    } else {
-                        cfg.listener_port.to_string()
-                    };
-                    println!(
-                        "  {} {} on {}:{} [TCP]",
-                        "●".bright_green(),
-                        cfg.name.bright_white().bold(),
-                        bind,
-                        port_str
-                    );
-                    let ct = self.conn_table.clone();
-                    let rl = self.request_logger.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = irc::start(cfg, bind, ct, rl).await {
-                            error!("IRCListener error: {}", e);
                         }
                     })
                 }

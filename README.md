@@ -1,5 +1,9 @@
 # Argus
 
+<p align="center">
+  <img src="media/logo.png" alt="Argus logo" width="200"/>
+</p>
+
 A Windows network traffic interception tool for malware analysis, written in Rust.
 
 ## What is Argus?
@@ -8,10 +12,10 @@ Argus intercepts all outgoing network traffic from a system and responds with fa
 
 Key capabilities:
 - **Automatic traffic redirection** — WinDivert rewrites packet destinations at kernel level; no manual DNS or proxy configuration needed
-- **Protocol-aware listeners** — HTTP/HTTPS, DNS, SMTP, FTP, IRC, POP3, raw TCP/UDP
+- **Protocol-aware listeners** — HTTP/HTTPS, DNS, SMTP, POP3, raw TCP/UDP
 - **Per-host HTTPS interception** — automatic CA generation with dynamic per-hostname leaf certificates (mitmproxy-style); install the CA once and all TLS traffic is decryptable
 - **Process identification** — every intercepted connection is attributed to the originating process name and PID
-- **Selective passthrough** — chosen processes, IPs, domains, or URL patterns are passed through transparently to the real destination instead of receiving a fake response
+- **Selective passthrough** — chosen processes, PIDs, IPs, domains, or URL patterns are passed through transparently to the real destination instead of receiving a fake response
 - **Selective logging suppression** — `NoLog` entries exclude matching connections from capture files
 - **Request/response capture** — every intercepted transaction is saved to disk under `capture/<process>/<pid>/<protocol>/`
 - **Customisable fake responses** — drop files into `default_files/` to serve custom content per path; built-in fallback if the directory or file is absent
@@ -66,7 +70,8 @@ DivertTraffic: Yes          # Enable WinDivert automatic traffic redirection
 [HTTPListener]
 Enabled: True
 Listener: HTTPListener
-Port: 80
+ServicePort: 80
+ListenerPort: 18080
 Protocol: TCP
 UseSSL: No
 Timeout: 10
@@ -74,7 +79,8 @@ Timeout: 10
 [HTTPSListener]
 Enabled: True
 Listener: HTTPListener
-Port: 443
+ServicePort: 443
+ListenerPort: 18443
 Protocol: TCP
 UseSSL: Yes
 Timeout: 10
@@ -141,53 +147,53 @@ default_files/
 [DNSListener]
 Enabled: True
 Listener: DNSListener
-Port: 53
+ServicePort: 53
+ListenerPort: 10053
 Protocol: UDP
 ResponseA: 127.0.0.1        # IP returned for A queries
 ResponseMX: mail.argus.local
 ResponseTXT: ARGUS
+
+# Optional: forward matching queries to the real DNS server.
+# Passthrough: curl.exe, 1234, 93.184.216.34, example.com, .*\.microsoft\.com
+
+# Optional: suppress capture files for matching queries.
+# NoLog: curl.exe, 1234, 93.184.216.34, analytics\.example\.com
 ```
 
 Supported record types: `A`, `AAAA` (returns `::1`), `MX`, `TXT`. Any other query type receives an `A` record fallback.
 
-### Listener example — SMTP / FTP / POP3
+**Testing the DNS listener:**
+
+```powershell
+# Query directly (requires WinDivert to be redirecting port 53)
+nslookup evil.example.com 127.0.0.1
+
+# Query the listener port directly (no WinDivert needed)
+nslookup evil.example.com 127.0.0.1 -port=10053
+```
+
+### Listener example — SMTP / POP3
 
 ```ini
 [SMTPListener]
 Enabled: True
 Listener: SMTPListener
-Port: 25
+ServicePort: 25
+ListenerPort: 10025
 Protocol: TCP
 Banner: 220 argus.local SMTP Service Ready
-
-[FTPListener]
-Enabled: True
-Listener: FTPListener
-Port: 21
-Protocol: TCP
-Banner: 220 Argus FTP Server
 
 [POPListener]
 Enabled: True
 Listener: POPListener
-Port: 110
+ServicePort: 110
+ListenerPort: 10110
 Protocol: TCP
 Banner: +OK Argus POP3 Server Ready
 ```
 
 Each listener logs credentials (USER/PASS) and protocol commands, and replies with plausible success responses to keep the malware running.
-
-### Listener example — IRC
-
-```ini
-[IRCListener]
-Enabled: True
-Listener: IRCListener
-Port: 6667
-Protocol: TCP
-```
-
-Handles `NICK`, `USER`, `JOIN`, `PRIVMSG`, `PING/PONG`, `MODE`, `WHO`, `WHOIS`, `NAMES`, and `QUIT`. Logs all channel joins and messages — commonly used C2 channels are captured transparently.
 
 ### Listener example — Raw TCP/UDP
 
@@ -195,14 +201,16 @@ Handles `NICK`, `USER`, `JOIN`, `PRIVMSG`, `PING/PONG`, `MODE`, `WHO`, `WHOIS`, 
 [RawTCPListener]
 Enabled: True
 Listener: RawListener
-Port: 1337
+ServicePort: 1337
+ListenerPort: 11337
 Protocol: TCP
 Timeout: 5
 
 [RawUDPListener]
 Enabled: True
 Listener: RawListener
-Port: 1338
+ServicePort: 1338
+ListenerPort: 11338
 Protocol: UDP
 Timeout: 5
 ```
@@ -219,9 +227,9 @@ The `Passthrough` key accepts a comma-separated list of entries. A connection is
 | PID          | `1234`                               | originating process PID      |
 | IPv4 address | `93.184.216.34`                      | original destination IP      |
 | IPv6 address | `2606:2800:220:1:248:1893:25c8:1946` | original destination IP      |
-| Domain       | `example\.com`, `example\..*`        | HTTP `Host` header           |
-| Domain+path  | `example\.com/api/v1`                | HTTP `Host` + URI prefix     |
-| URL          | `http://example\.com/path`           | scheme stripped, then above  |
+| Domain       | `example.com`, `.*\.microsoft\.com`  | HTTP `Host` / DNS query name |
+| Domain+path  | `example.com/api/v1`                 | HTTP `Host` + URI prefix     |
+| URL          | `http://example.com/path`            | scheme stripped, then above  |
 
 **Process names and domain/URL entries are treated as case-insensitive regular expressions** anchored at the start (`^`). A plain name like `curl.exe` still works — the `.` in regex matches any character, which is harmless in practice. Use `curl\.exe` for a precise literal-dot match.
 
@@ -229,8 +237,8 @@ The `Passthrough` key accepts a comma-separated list of entries. A connection is
 # Pass through any process whose name starts with "curl"
 Passthrough: curl.*
 
-# Pass through requests to any .example TLD
-Passthrough: .*\.example\.(com|it|org)
+# Pass through DNS queries for any Microsoft domain
+Passthrough: .*\.microsoft\.com
 
 # Pass through requests to a specific path only
 Passthrough: updates\.vendor\.com/v2/check
@@ -239,7 +247,7 @@ Passthrough: updates\.vendor\.com/v2/check
 Passthrough: malware_loader.exe, 93.184.216.34, c2\.evil\.io
 ```
 
-When a connection is passed through:
+When an HTTP connection is passed through:
 - **Phase 1** (before reading data): PID, process name, and IP entries are checked. If matched, the raw TCP stream is proxied transparently (`copy_bidirectional`).
 - **Phase 2** (after reading HTTP headers): domain and URL entries are checked against the `Host` header and URI. The already-read request bytes are replayed to the real server before proxying the rest.
 
@@ -247,7 +255,7 @@ Argus's own outbound connections (created during passthrough) are automatically 
 
 ### Selective logging suppression
 
-The `NoLog` key uses the same entry format as `Forward`. Matching connections are not written to capture files (they are still logged to the console/log file at `info` level).
+The `NoLog` key uses the same entry format as `Passthrough`. Matching connections are not written to capture files (they are still logged to the console/log file at `info` level).
 
 ```ini
 NoLog: analytics\.example\.com, telemetry\.microsoft\.com
@@ -270,23 +278,21 @@ capture/
 
 - **`<process_name>`** — sanitised executable name (e.g. `malware.exe`)
 - **`<pid>`** — numeric PID; a new subdirectory is created if the process restarts
-- **`<protocol>`** — `http`, `https`, `smtp`, `ftp`, `irc`, `pop`, `dns`, `raw`
+- **`<protocol>`** — `http`, `https`, `smtp`, `pop`, `dns`, `raw`
 - **filename** — `<yyyymmdd>_<HHMMSS>_<NNNN>_<req|rsp>.log` where `NNNN` is a per-PID transaction counter
 
 The default capture directory is `capture\` relative to the working directory. Override with `--log-dir`.
 
 ## Listeners
 
-| Listener      | Port  | Protocol | Description                                    |
-|---------------|-------|----------|------------------------------------------------|
+| Listener      | Port  | Protocol | Description                                         |
+|---------------|-------|----------|-----------------------------------------------------|
 | HTTPListener  | 80    | TCP      | HTTP — serves fake HTML/files, passthrough on match |
-| HTTPSListener | 443   | TCP      | HTTPS — per-host MITM certs, decrypted capture |
-| DNSListener   | 53    | UDP      | DNS queries → configurable A/AAAA/MX/TXT records |
-| SMTPListener  | 25    | TCP      | Email sending — logs credentials and message body |
-| FTPListener   | 21    | TCP      | FTP — logs credentials and file operations     |
-| IRCListener   | 6667  | TCP      | IRC C2 channels — logs joins and messages      |
-| POPListener   | 110   | TCP      | POP3 email retrieval — logs credentials        |
-| RawListener   | any   | TCP/UDP  | Catch-all — hex dump logging, echo response    |
+| HTTPSListener | 443   | TCP      | HTTPS — per-host MITM certs, decrypted capture      |
+| DNSListener   | 53    | UDP      | DNS — configurable A/AAAA/MX/TXT, passthrough       |
+| SMTPListener  | 25    | TCP      | Email sending — logs credentials and message body   |
+| POPListener   | 110   | TCP      | POP3 email retrieval — logs credentials             |
+| RawListener   | any   | TCP/UDP  | Catch-all — hex dump logging, echo response         |
 
 ## Architecture
 
@@ -302,11 +308,9 @@ argus/
 │   │   └── mod.rs           # WinDivert symmetric NAT + process identification
 │   └── listeners/
 │       ├── mod.rs           # Listener manager
-│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, passthrough mode
-│       ├── dns.rs           # DNS query interception
+│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, passthrough
+│       ├── dns.rs           # DNS query interception, passthrough, logging
 │       ├── smtp.rs          # SMTP email interception
-│       ├── ftp.rs           # FTP interception
-│       ├── irc.rs           # IRC C2 channel interception
 │       ├── pop.rs           # POP3 interception
 │       └── raw.rs           # Raw TCP/UDP fallback
 ├── configs/
@@ -334,7 +338,7 @@ This symmetric approach ensures the TCP three-way handshake completes correctly 
 
 ### Process identification
 
-For every **new** connection, Argus calls `GetExtendedTcpTable` / `GetExtendedUdpTable` to map the client source port to a PID, then `QueryFullProcessImageNameW` to resolve the executable name. This information is stored in the shared connection table and logged alongside the intercepted traffic.
+For every new connection, Argus calls `GetExtendedTcpTable` / `GetExtendedUdpTable` to map the client source port to a PID, then `QueryFullProcessImageNameW` to resolve the executable name. This information is stored in the shared connection table and logged alongside the intercepted traffic.
 
 ### HTTPS interception
 
