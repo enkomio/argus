@@ -9,23 +9,12 @@ use tracing::info;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgusConfig {
     pub argus: ArgusSection,
-    pub diverter: DiverterSection,
     pub listeners: Vec<ListenerConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArgusSection {
     pub divert_traffic: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiverterSection {
-    pub network_mode: String,
-    pub dump_packets: bool,
-    pub dump_packets_file_prefix: String,
-    pub redirect_all_traffic: bool,
-    pub default_tcp_listener: String,
-    pub default_udp_listener: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,14 +79,6 @@ impl Default for ArgusConfig {
             argus: ArgusSection {
                 divert_traffic: true,
             },
-            diverter: DiverterSection {
-                network_mode: "auto".to_string(),
-                dump_packets: true,
-                dump_packets_file_prefix: "packets".to_string(),
-                redirect_all_traffic: true,
-                default_tcp_listener: "RawTCPListener".to_string(),
-                default_udp_listener: "RawUDPListener".to_string(),
-            },
             listeners: Self::default_listeners(),
         }
     }
@@ -148,18 +129,6 @@ impl ArgusConfig {
                 .unwrap_or(true);
         }
 
-        // Parse Diverter section
-        if let Some(diverter) = section_data.get("Diverter") {
-            config.diverter.network_mode = diverter
-                .get("networkmode")
-                .cloned()
-                .unwrap_or("auto".to_string());
-            config.diverter.dump_packets = diverter
-                .get("dumppackets")
-                .map(|v| v.to_lowercase() == "yes")
-                .unwrap_or(false);
-        }
-
         // Parse listener sections.
         // `found_any` is true whenever the config file contained at least one
         // listener section (even if all are disabled).  The default listener
@@ -168,7 +137,7 @@ impl ArgusConfig {
         config.listeners.clear();
         let mut found_any = false;
         for (section, data) in &section_data {
-            if section == "Argus" || section == "Diverter" {
+            if section == "Argus" {
                 continue;
             }
 

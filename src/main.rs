@@ -80,10 +80,6 @@ struct Args {
     #[arg(short = 'l', long = "log")]
     log_file: Option<String>,
 
-    /// Dump packets to PCAP
-    #[arg(short = 'd', long = "dump-packets")]
-    dump_packets: bool,
-
     /// List available listeners
     #[arg(long = "list-listeners")]
     list_listeners: bool,

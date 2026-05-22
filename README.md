@@ -4,7 +4,21 @@
   <img src="media/logo.png" alt="Argus logo" width="500"/>
 </p>
 
-A Windows network traffic interception tool for malware analysis, written in Rust.
+A Windows network traffic interception tool for malware analysis.
+
+## Index
+
+- [What is Argus?](#what-is-argus)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Customising fake HTTP responses](#customising-fake-http-responses)
+- [HTTPS interception (MITM)](#https-interception-mitm)
+- [ForwardTo — external traffic modifier](#forwardto--external-traffic-modifier)
+- [Request/response capture](#requestresponse-capture)
+- [Listeners](#listeners)
+- [Building](#building)
+- [Legal Notice](#legal-notice)
+- [License](#license)
 
 ## What is Argus?
 
@@ -20,37 +34,31 @@ Key capabilities:
 - **Request/response capture** — every intercepted transaction is saved to disk under `capture/<process>/<pid>/<protocol>/`
 - **Customisable fake responses** — drop files into `default_files/` to serve custom content per path; built-in fallback if the directory or file is absent
 
-## Requirements
-
-- Windows 10/11 or Windows Server 2016+
-- **Administrator privileges** (required for WinDivert and privileged ports)
-- [WinDivert](https://reqrypt.org/windivert.html) — `WinDivert.dll` and `WinDivert64.sys` must be in the same folder as `argus.exe` (included in the repository)
-
 ## Usage
 
 Argus requires an elevated terminal or UAC prompt (the embedded manifest requests `requireAdministrator` automatically).
 
 ```powershell
 # Run with default config
-.\target\release\argus.exe
+argus.exe
 
 # Custom config file
-.\target\release\argus.exe -c configs\default.ini
+argus.exe -c configs\default.ini
 
 # Verbose / debug logging
-.\target\release\argus.exe -v
+argus.exe -v
 
 # Bind listeners to a specific address
-.\target\release\argus.exe -b 0.0.0.0
+argus.exe -b 0.0.0.0
 
 # Write log output to file
-.\target\release\argus.exe -l argus.log
+argus.exe -l argus.log
 
 # Override capture directory (default: capture\)
-.\target\release\argus.exe --log-dir D:\analysis\run1
+argus.exe --log-dir D:\analysis\run1
 
 # List available listener types
-.\target\release\argus.exe --list-listeners
+argus.exe --list-listeners
 ```
 
 ## Configuration
@@ -62,6 +70,73 @@ Edit `configs\default.ini` to enable/disable listeners and customise responses.
 ```ini
 [Argus]
 DivertTraffic: Yes          # Enable WinDivert automatic traffic redirection
+```
+
+### Listener configuration reference
+
+Every listener section (except `[Argus]`) accepts the following keys:
+
+| Key | Required | Applies to | Description | Example values |
+|-----|----------|------------|-------------|----------------|
+| `Listener` | ✅ | All | Listener type to use | `HTTPListener`, `DNSListener`, `SMTPListener`, `POPListener`, `RawListener` |
+| `Enabled` | ✅ | All | Whether to start this listener | `True`, `False` |
+| `ServicePort` | ✅ | All | Port WinDivert intercepts (traffic destined for this port is captured) | `80`, `443`, `53`, `25` |
+| `ListenerPort` | ✖️ | All | Port Argus actually binds on locally. Defaults to `ServicePort` when omitted | `18080`, `18443`, `10053` |
+| `Protocol` | ✖️ | All | Transport protocol. Default: `TCP` | `TCP`, `UDP` |
+| `UseSSL` | ✖️ | HTTP | Enable TLS termination (HTTPS MITM). Default: `No` | `Yes`, `No` |
+| `Timeout` | ✖️ | All | Idle connection timeout in seconds. Default: `10` | `5`, `10`, `30` |
+| `Banner` | ✖️ | SMTP, POP3 | Greeting line sent to the client on connect | `220 mail.example.com ESMTP`, `+OK POP3 ready` |
+| `ResponseA` | ✖️ | DNS | IP address returned for **A** queries | `127.0.0.1`, `192.168.1.1` |
+| `ResponseMX` | ✖️ | DNS | Hostname returned for **MX** queries | `mail.argus.local` |
+| `ResponseTXT` | ✖️ | DNS | String returned for **TXT** queries | `v=spf1 -all`, `ARGUS` |
+| `Passthrough` | ✖️ | All | Comma-separated list of processes / IPs / domains to pass through to the real destination instead of intercepting. See [Selective passthrough](#selective-passthrough) | `curl.exe`, `93.184.216.34`, `.*\.microsoft\.com` |
+| `NoLog` | ✖️ | All | Comma-separated list of processes / IPs / domains whose traffic is **not** written to capture files. Same entry format as `Passthrough` | `analytics\.example\.com`, `telemetry\.microsoft\.com` |
+| `ForwardTo` | ✖️ | All | `IP:PORT` of an external TCP endpoint that can inspect and modify every request and response before it is processed. See [ForwardTo](#forwardto--external-traffic-modifier) | `127.0.0.1:9999` |
+
+> **`ServicePort` vs `ListenerPort`** — `ServicePort` is the well-known port the monitored application connects to (e.g. 80 for HTTP). WinDivert transparently redirects that traffic to `ListenerPort`, which is where Argus actually listens. Using a high-numbered `ListenerPort` avoids privilege conflicts when two listeners would otherwise share the same port.
+
+### Selective passthrough
+
+The `Passthrough` key accepts a comma-separated list of entries. A connection is passed through to the real destination when **any** entry matches. Supported entry types:
+
+| Entry type   | Example                              | Matched against              |
+|--------------|--------------------------------------|------------------------------|
+| Process name | `curl.exe`, `curl.*`                 | originating process name     |
+| PID          | `1234`                               | originating process PID      |
+| IPv4 address | `93.184.216.34`                      | original destination IP      |
+| IPv6 address | `2606:2800:220:1:248:1893:25c8:1946` | original destination IP      |
+| Domain       | `example.com`, `.*\.microsoft\.com`  | HTTP `Host` / DNS query name |
+| Domain+path  | `example.com/api/v1`                 | HTTP `Host` + URI prefix     |
+| URL          | `http://example.com/path`            | scheme stripped, then above  |
+
+**Process names and domain/URL entries are treated as case-insensitive regular expressions** anchored at the start (`^`). A plain name like `curl.exe` still works — the `.` in regex matches any character, which is harmless in practice. Use `curl\.exe` for a precise literal-dot match.
+
+```ini
+# Pass through any process whose name starts with "curl"
+Passthrough: curl.*
+
+# Pass through DNS queries for any Microsoft domain
+Passthrough: .*\.microsoft\.com
+
+# Pass through requests to a specific path only
+Passthrough: updates\.vendor\.com/v2/check
+
+# Mix multiple entry types
+Passthrough: malware_loader.exe, 93.184.216.34, c2\.evil\.io
+```
+
+When an HTTP connection is passed through:
+- **Phase 1** (before reading data): PID, process name, and IP entries are checked. If matched, the raw TCP stream is proxied transparently (`copy_bidirectional`).
+- **Phase 2** (after reading HTTP headers): domain and URL entries are checked against the `Host` header and URI. The already-read request bytes are replayed to the real server before proxying the rest.
+
+Argus's own outbound connections (created during passthrough) are automatically excluded from WinDivert interception to prevent redirect loops.
+
+### Selective logging suppression
+
+The `NoLog` key uses the same entry format as `Passthrough`. Matching connections are not written to capture files (they are still logged to the console/log file at `info` level).
+
+```ini
+NoLog: analytics\.example\.com, telemetry\.microsoft\.com
 ```
 
 ### Listener example — HTTP / HTTPS
@@ -92,55 +167,6 @@ Timeout: 10
 # NoLog: curl.exe, 1234, 93.184.216.34, analytics\.example\.com
 ```
 
-### HTTPS interception (MITM)
-
-On first run, Argus generates a CA key pair in `configs/`:
-
-```
-configs/
-├── argus-ca.crt   ← install this in Windows Certificate Store (Trusted Root CAs)
-└── argus-ca.key   ← private key — keep secret
-```
-
-For each TLS connection, Argus dynamically generates a leaf certificate for the requested hostname, signed by the CA. Once the CA is trusted by the OS, browsers and HTTP clients accept the leaf certificates without errors.
-
-**Installing the CA on Windows:**
-
-```powershell
-certutil -addstore -f "Root" configs\argus-ca.crt
-```
-
-**Removing the CA:**
-
-```
-certmgr.msc → Trusted Root Certification Authorities → Certificates → right-click "Argus CA" → Delete
-```
-
-The CA certificate expires after one year. Argus warns at startup if the loaded CA is expired.
-
-### Customising fake HTTP responses
-
-The HTTP listener looks for files in the `default_files/` directory before falling back to the built-in response.
-
-Resolution order for each incoming request:
-
-| Priority | Path tried | Example for `GET /login.html` |
-|----------|-----------|-------------------------------|
-| 1 | `default_files/{uri}` | `default_files/login.html` |
-| 2 | `default_files/index.html` | generic HTML fallback |
-| 3 | Built-in constant | always available |
-
-Place any file in `default_files/` and it will be served automatically when the URI matches. The URI path is sanitised before use (leading `/` stripped, `..` components removed) to prevent directory traversal.
-
-```
-default_files/
-├── index.html        ← served for "/" and any unmatched HTML request
-├── login.html        ← served for "/login.html"
-├── api/
-│   └── status.json   ← served for "/api/status.json"
-└── update.exe        ← served for "/update.exe"
-```
-
 ### Listener example — DNS
 
 ```ini
@@ -162,16 +188,6 @@ ResponseTXT: ARGUS
 ```
 
 Supported record types: `A`, `AAAA` (returns `::1`), `MX`, `TXT`. Any other query type receives an `A` record fallback.
-
-**Testing the DNS listener:**
-
-```powershell
-# Query directly (requires WinDivert to be redirecting port 53)
-nslookup evil.example.com 127.0.0.1
-
-# Query the listener port directly (no WinDivert needed)
-nslookup evil.example.com 127.0.0.1 -port=10053
-```
 
 ### Listener example — SMTP / POP3
 
@@ -217,49 +233,54 @@ Timeout: 5
 
 Accepts any traffic, echoes it back, and logs a hex dump of up to 256 bytes per packet. Used as the default catch-all for ports with no dedicated listener.
 
-### Selective passthrough
+## Customising fake HTTP responses
 
-The `Passthrough` key accepts a comma-separated list of entries. A connection is passed through to the real destination when **any** entry matches. Supported entry types:
+The HTTP listener looks for files in the `default_files/` directory before falling back to the built-in response.
 
-| Entry type   | Example                              | Matched against              |
-|--------------|--------------------------------------|------------------------------|
-| Process name | `curl.exe`, `curl.*`                 | originating process name     |
-| PID          | `1234`                               | originating process PID      |
-| IPv4 address | `93.184.216.34`                      | original destination IP      |
-| IPv6 address | `2606:2800:220:1:248:1893:25c8:1946` | original destination IP      |
-| Domain       | `example.com`, `.*\.microsoft\.com`  | HTTP `Host` / DNS query name |
-| Domain+path  | `example.com/api/v1`                 | HTTP `Host` + URI prefix     |
-| URL          | `http://example.com/path`            | scheme stripped, then above  |
+Resolution order for each incoming request:
 
-**Process names and domain/URL entries are treated as case-insensitive regular expressions** anchored at the start (`^`). A plain name like `curl.exe` still works — the `.` in regex matches any character, which is harmless in practice. Use `curl\.exe` for a precise literal-dot match.
+| Priority | Path tried | Example for `GET /login.html` |
+|----------|-----------|-------------------------------|
+| 1 | `default_files/{uri}` | `default_files/login.html` |
+| 2 | `default_files/index.html` | generic HTML fallback |
+| 3 | Built-in constant | always available |
 
-```ini
-# Pass through any process whose name starts with "curl"
-Passthrough: curl.*
+Place any file in `default_files/` and it will be served automatically when the URI matches. The URI path is sanitised before use (leading `/` stripped, `..` components removed) to prevent directory traversal.
 
-# Pass through DNS queries for any Microsoft domain
-Passthrough: .*\.microsoft\.com
-
-# Pass through requests to a specific path only
-Passthrough: updates\.vendor\.com/v2/check
-
-# Mix multiple entry types
-Passthrough: malware_loader.exe, 93.184.216.34, c2\.evil\.io
+```
+default_files/
+├── index.html        ← served for "/" and any unmatched HTML request
+├── login.html        ← served for "/login.html"
+├── api/
+│   └── status.json   ← served for "/api/status.json"
+└── update.exe        ← served for "/update.exe"
 ```
 
-When an HTTP connection is passed through:
-- **Phase 1** (before reading data): PID, process name, and IP entries are checked. If matched, the raw TCP stream is proxied transparently (`copy_bidirectional`).
-- **Phase 2** (after reading HTTP headers): domain and URL entries are checked against the `Host` header and URI. The already-read request bytes are replayed to the real server before proxying the rest.
+## HTTPS interception (MITM)
 
-Argus's own outbound connections (created during passthrough) are automatically excluded from WinDivert interception to prevent redirect loops.
+On first run, Argus generates a CA key pair in `configs/`:
 
-### Selective logging suppression
-
-The `NoLog` key uses the same entry format as `Passthrough`. Matching connections are not written to capture files (they are still logged to the console/log file at `info` level).
-
-```ini
-NoLog: analytics\.example\.com, telemetry\.microsoft\.com
 ```
+configs/
+├── argus-ca.crt   ← install this in Windows Certificate Store (Trusted Root CAs)
+└── argus-ca.key   ← private key — keep secret
+```
+
+For each TLS connection, Argus dynamically generates a leaf certificate for the requested hostname, signed by the CA. Once the CA is trusted by the OS, browsers and HTTP clients accept the leaf certificates without errors.
+
+**Installing the CA on Windows:**
+
+```powershell
+certutil -addstore -f "Root" configs\argus-ca.crt
+```
+
+**Removing the CA:**
+
+```
+certmgr.msc → Trusted Root Certification Authorities → Certificates → right-click "Argus CA" → Delete
+```
+
+The CA certificate expires after one year. Argus warns at startup if the loaded CA is expired.
 
 ## ForwardTo — external traffic modifier
 
@@ -332,7 +353,7 @@ python example_interceptor.py --debug          # verbose output
 **Terminal 2 — start Argus (elevated):**
 
 ```powershell
-.\target\release\argus.exe -c configs\default.ini
+argus.exe -c configs\default.ini
 ```
 
 **Expected output (interceptor terminal):**
@@ -430,69 +451,13 @@ The default capture directory is `capture\` relative to the working directory. O
 | POPListener   | 110   | TCP      | POP3 email retrieval — logs credentials             |
 | RawListener   | any   | TCP/UDP  | Catch-all — hex dump logging, echo response         |
 
-## Architecture
-
-```
-argus/
-├── src/
-│   ├── main.rs              # Entry point, CLI, admin check, startup
-│   ├── config.rs            # INI config parser
-│   ├── conn_table.rs        # Shared connection table (diverter → listeners)
-│   ├── logger.rs            # tracing setup (terminal + optional file)
-│   ├── request_logger.rs    # Per-transaction capture file writer
-│   ├── forward_to.rs        # ForwardTo wire protocol (external traffic modifier)
-│   ├── diverter/
-│   │   └── mod.rs           # WinDivert symmetric NAT + process identification
-│   └── listeners/
-│       ├── mod.rs           # Listener manager
-│       ├── http.rs          # HTTP/HTTPS interception, MITM TLS, passthrough
-│       ├── dns.rs           # DNS query interception, passthrough, logging
-│       ├── smtp.rs          # SMTP email interception
-│       ├── pop.rs           # POP3 interception
-│       └── raw.rs           # Raw TCP/UDP fallback
-├── python/
-│   ├── argus_interceptor.py # Reusable ForwardTo endpoint library + protocol parsers
-│   └── example_interceptor.py  # Example: HTTP title patching, DNS logging
-├── configs/
-│   └── default.ini          # Default configuration
-├── default_files/
-│   └── index.html           # Default HTTP fake response (customisable)
-├── Cargo.toml
-├── build.rs                 # WinDivert linker setup + UAC manifest embedding
-└── README.md
-```
-
-## How it works
-
-### Traffic diversion
-
-Argus uses [WinDivert](https://reqrypt.org/windivert.html) to intercept outbound packets at the network layer before they leave the machine.
-
-For each intercepted packet (outbound, non-loopback, matching a listener port):
-
-1. **Symmetric NAT**: both source and destination IPs are rewritten to `127.0.0.1`. The original addresses are stored in an in-memory connection table keyed by the client's source port.
-2. **Re-injection**: the modified packet is re-injected. Windows routes it via the loopback interface to the local listener.
-3. **Reverse NAT**: when the listener replies (outbound loopback packet with a matching source port), both IPs are restored to their original values before re-injection, so the application's TCP stack sees the expected addresses.
-
-This symmetric approach ensures the TCP three-way handshake completes correctly regardless of the machine's real IP address.
-
-### Process identification
-
-For every new connection, Argus calls `GetExtendedTcpTable` / `GetExtendedUdpTable` to map the client source port to a PID, then `QueryFullProcessImageNameW` to resolve the executable name. This information is stored in the shared connection table and logged alongside the intercepted traffic.
-
-### HTTPS interception
-
-Argus acts as a transparent TLS MITM proxy using a locally-generated CA:
-
-1. At startup, `configs/argus-ca.crt` and `configs/argus-ca.key` are loaded (or generated if absent). The CA is valid for one year; Argus warns if it is expired.
-2. For each incoming TLS connection, the SNI hostname from the `ClientHello` is used to generate a leaf certificate on the fly, signed by the CA. Leaf certificates are cached in memory per hostname.
-3. The TLS handshake completes with the leaf certificate. Argus decrypts the plaintext request, logs it, and returns a fake HTTP response (or passes through to the real server if the hostname matches a `Passthrough` rule).
-
-### Selective passthrough
-
-When a connection matches the `Passthrough` list, the listener acts as a transparent TCP proxy (`tokio::io::copy_bidirectional`) to the real destination. Argus's own outbound connections are recognised by PID and bypass the WinDivert filter, preventing redirect loops.
-
 ## Building
+
+### Requirements
+
+- Windows 10/11 or Windows Server 2016+
+- **Administrator privileges** (required for WinDivert and privileged ports)
+- [WinDivert](https://reqrypt.org/windivert.html) — `WinDivert.dll` and `WinDivert64.sys` must be in the same folder as `argus.exe` (included in the repository)
 
 ### 1. Install Rust
 
@@ -512,18 +477,7 @@ The `build.rs` script automatically:
 - Copies `WinDivert.dll` and `WinDivert64.sys` next to `argus.exe`
 - Embeds a UAC manifest requesting `requireAdministrator`
 
-Binary location: `.\target\release\argus.exe`
-
-## Why Rust?
-
-| Feature          | Typical Python tool | Argus (Rust)      |
-|------------------|---------------------|-------------------|
-| Memory usage     | ~80–150 MB          | ~5–15 MB          |
-| Startup time     | 2–5 seconds         | <100 ms           |
-| Concurrent conns | Limited by GIL      | Millions (async)  |
-| Binary size      | ~50 MB (PyInstaller)| ~5 MB (static)    |
-| Dependencies     | Python + 20+ pkgs   | Single binary     |
-| Memory safety    | GC managed          | Compile-time safe |
+Binary location: `argus.exe`
 
 ## Legal Notice
 
@@ -531,4 +485,4 @@ This tool is intended for legitimate malware analysis and security research. Use
 
 ## License
 
-Apache 2.0
+[PolyForm Noncommercial 1.0.0](LICENSE) — free for personal use, security research, and non-commercial purposes. Commercial use is prohibited.
