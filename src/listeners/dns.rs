@@ -8,6 +8,7 @@ use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
 use crate::conn_table::SharedConnTable;
+use crate::forward_to::{self, Direction, Meta};
 use crate::request_logger::SharedRequestLogger;
 
 const DNS_QR_RESPONSE: u16 = 0x8000;
@@ -300,8 +301,21 @@ pub async fn start(
             Err(e) => { warn!("DNS recv error: {}", e); continue; }
         };
 
-        let data = buf[..n].to_vec();
+        let raw_data = buf[..n].to_vec();
         let cfg  = config.clone();
+
+        // ── ForwardTo: request ────────────────────────────────────────────
+        let data = if let Some(ref ft_addr) = cfg.forward_to {
+            let (pid, proc_name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+            let ci = conn_table.read().ok().and_then(|t| t.get(&src_addr.port()).cloned());
+            let (dst_ip, dst_port) = ci.as_ref()
+                .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
+                .unwrap_or_default();
+            let meta = Meta::new(Direction::Request, "dns", src_addr, dst_ip, dst_port, proc_name, pid);
+            forward_to::call(ft_addr, &meta, &raw_data).await
+        } else {
+            raw_data
+        };
 
         let (header, questions) = match parse_dns_request(&data) {
             Some(v) => v,
@@ -407,7 +421,16 @@ pub async fn start(
             );
         }
 
-        let response = build_dns_response(&header, &questions, &cfg);
+        let fake = build_dns_response(&header, &questions, &cfg);
+
+        // ── ForwardTo: response ───────────────────────────────────────────
+        let response = if let Some(ref ft_addr) = cfg.forward_to {
+            let meta = Meta::new(Direction::Response, "dns", src_addr,
+                &proc_label, 53, &proc_name, pid);
+            forward_to::call(ft_addr, &meta, &fake).await
+        } else {
+            fake
+        };
 
         if should_log {
             if let Some(ref logger) = request_logger {

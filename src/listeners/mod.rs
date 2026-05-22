@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tracing::{info, warn, error};
 use colored::*;
 
-use crate::config::{ArgusConfig, ListenerConfig};
+use crate::config::ArgusConfig;
 use crate::conn_table::SharedConnTable;
 use crate::request_logger::SharedRequestLogger;
 

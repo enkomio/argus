@@ -261,6 +261,142 @@ The `NoLog` key uses the same entry format as `Passthrough`. Matching connection
 NoLog: analytics\.example\.com, telemetry\.microsoft\.com
 ```
 
+## ForwardTo — external traffic modifier
+
+The `ForwardTo` key lets you route every intercepted request and response through an external TCP endpoint before Argus processes or returns it. The endpoint can inspect and modify the bytes; whatever it returns is used in place of the original payload. If the endpoint is unreachable or returns an error, Argus falls back to the original payload — traffic is never dropped.
+
+### Wire protocol
+
+```
+Argus → endpoint:
+  [4 bytes BE uint32]  length of JSON metadata header
+  [N bytes UTF-8]      JSON metadata
+  [4 bytes BE uint32]  length of raw payload
+  [M bytes]            raw payload
+
+endpoint → Argus:
+  [4 bytes BE uint32]  length of (possibly modified) payload
+  [K bytes]            payload to use in place of the original
+```
+
+**JSON metadata fields:**
+
+| Field      | Type   | Description                                          |
+|------------|--------|------------------------------------------------------|
+| `direction`| string | `"request"` or `"response"`                         |
+| `protocol` | string | `"http"`, `"https"`, `"dns"`, `"smtp"`, `"pop3"`, `"raw"` |
+| `src_ip`   | string | Client source IP                                     |
+| `src_port` | number | Client source port                                   |
+| `dst_ip`   | string | Original destination IP (before WinDivert)           |
+| `dst_port` | number | Original destination port                            |
+| `process`  | string | Originating executable name (e.g. `"malware.exe"`)  |
+| `pid`      | number | Originating PID (`0` = unknown)                     |
+
+### Configuration
+
+Add `ForwardTo` to any listener section in `configs\default.ini`:
+
+```ini
+[HTTPListener]
+Enabled: True
+Listener: HTTPListener
+ServicePort: 80
+ListenerPort: 18080
+Protocol: TCP
+ForwardTo: 127.0.0.1:9999
+
+[DNSListener]
+Enabled: True
+Listener: DNSListener
+ServicePort: 53
+ListenerPort: 10053
+Protocol: UDP
+ForwardTo: 127.0.0.1:9999
+```
+
+Multiple listeners can point to the same endpoint, or each to a different one.
+
+### Running the example Python forwarder
+
+A ready-to-use example is provided in `python/example_interceptor.py`. It requires no external dependencies (standard library only).
+
+**Terminal 1 — start the forwarder first:**
+
+```bash
+cd python
+python example_interceptor.py                  # listens on 0.0.0.0:9999
+python example_interceptor.py --port 8888      # custom port
+python example_interceptor.py --debug          # verbose output
+```
+
+**Terminal 2 — start Argus (elevated):**
+
+```powershell
+.\target\release\argus.exe -c configs\default.ini
+```
+
+**Expected output (interceptor terminal):**
+
+```
+12:34:01  INFO     Argus interceptor listening on 0.0.0.0:9999
+12:34:01  INFO     Handling protocols: http, https, dns, smtp, raw
+12:34:01  INFO     Add  'ForwardTo: 127.0.0.1:9999'  to any listener in configs/default.ini
+12:34:01  INFO     ────────────────────────────────────────────────────────────
+12:34:45  INFO     [HTTP req]  malware.exe  →  GET /c2/beacon
+12:34:45  INFO     [HTTP rsp]  200 OK  (1024 bytes)  title tag patched
+12:34:46  INFO     [DNS  req]  malware.exe  →  A evil-c2.example.com
+12:34:46  INFO     [DNS  rsp]  evil-c2.example.com A TTL=60 127.0.0.1
+```
+
+### Python library (`argus_interceptor`)
+
+`python/argus_interceptor.py` is a zero-dependency library that handles all socket framing. Implement only the handlers you need:
+
+```python
+from argus_interceptor import (
+    create_interceptor,
+    http_request, http_response,
+    dns_message,
+    smtp_response, smtp_command,
+)
+
+def handle_http(meta, payload):
+    if meta.direction == "response":
+        resp = http_response(payload)
+        resp.body = resp.body.replace(b"foo", b"bar")
+        return resp.to_bytes()   # Content-Length auto-updated
+    return payload
+
+def handle_dns(meta, payload):
+    msg = dns_message(payload)
+    for q in msg.questions:
+        print(f"{q.type_name} query for {q.name}")
+    return payload
+
+interceptor = create_interceptor(
+    http_handler=handle_http,
+    https_handler=handle_http,
+    dns_handler=handle_dns,
+)
+interceptor.serve()
+```
+
+**Built-in protocol parsers:**
+
+| Function | Returns | Key fields |
+|---|---|---|
+| `http_request(payload)` | `HttpRequest` | `.method`, `.path`, `.headers`, `.body` |
+| `http_response(payload)` | `HttpResponse` | `.status_code`, `.status_text`, `.headers`, `.body` |
+| `dns_message(payload)` | `DnsMessage` | `.questions`, `.answers`, `.is_query`, `.rcode` |
+| `smtp_response(payload)` | `SmtpResponse` | `.code`, `.lines` |
+| `smtp_command(payload)` | `SmtpCommand` | `.command`, `.args` |
+
+`Headers` is a case-insensitive dict; `HttpRequest.to_bytes()` and `HttpResponse.to_bytes()` rebuild the raw message and update `Content-Length` automatically.
+
+`DnsRecord.address` returns the decoded IP for A/AAAA records; `DnsRecord.text` returns the decoded string for TXT records. `DnsMessage.to_bytes()` re-serialises the DNS wire format.
+
+The interceptor can also be implemented in any other language — the wire protocol is language-agnostic (see wire format above). ForwardTo is called for both intercepted **and** passthrough connections, so the endpoint sees all traffic regardless of whether Argus is returning a fake response or proxying to the real server.
+
 ## Request/response capture
 
 Every intercepted transaction is saved to disk. The directory layout is:
@@ -304,6 +440,7 @@ argus/
 │   ├── conn_table.rs        # Shared connection table (diverter → listeners)
 │   ├── logger.rs            # tracing setup (terminal + optional file)
 │   ├── request_logger.rs    # Per-transaction capture file writer
+│   ├── forward_to.rs        # ForwardTo wire protocol (external traffic modifier)
 │   ├── diverter/
 │   │   └── mod.rs           # WinDivert symmetric NAT + process identification
 │   └── listeners/
@@ -313,6 +450,9 @@ argus/
 │       ├── smtp.rs          # SMTP email interception
 │       ├── pop.rs           # POP3 interception
 │       └── raw.rs           # Raw TCP/UDP fallback
+├── python/
+│   ├── argus_interceptor.py # Reusable ForwardTo endpoint library + protocol parsers
+│   └── example_interceptor.py  # Example: HTTP title patching, DNS logging
 ├── configs/
 │   └── default.ini          # Default configuration
 ├── default_files/

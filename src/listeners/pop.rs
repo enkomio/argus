@@ -8,6 +8,7 @@ use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
 use crate::conn_table::SharedConnTable;
+use crate::forward_to::{self, Direction, Meta};
 use crate::request_logger::SharedRequestLogger;
 
 fn log_pop(event: &str, detail: &str, src_addr: &SocketAddr, config: &ListenerConfig) {
@@ -20,6 +21,15 @@ macro_rules! send {
         $resp.extend_from_slice($data);
         $writer.write_all($data).await?
     }};
+}
+
+/// Apply ForwardTo to `data` if `ft_addr` is set, otherwise return `data` unchanged.
+async fn ft(ft_addr: &Option<String>, meta: Meta, data: &[u8]) -> Vec<u8> {
+    if let Some(ref addr) = ft_addr {
+        forward_to::call(addr, &meta, data).await
+    } else {
+        data.to_vec()
+    }
 }
 
 const FAKE_EMAIL: &str = "From: admin@argus.local\r\n\
@@ -50,9 +60,18 @@ async fn handle_pop(
     let mut req_transcript:  Vec<u8> = Vec::new();
     let mut resp_transcript: Vec<u8> = Vec::new();
 
+    // ForwardTo connection info (resolved once per session)
+    let ci = conn_table.read().ok().and_then(|t| t.get(&src_addr.port()).cloned());
+    let (ft_dst_ip, ft_dst_port) = ci.as_ref()
+        .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
+        .unwrap_or_default();
+    let ft_addr = config.forward_to.clone();
+
     let banner = config.banner.as_deref().unwrap_or("+OK Argus POP3 Server Ready");
     let banner_line = format!("{}\r\n", banner);
-    send!(writer, resp_transcript, banner_line.as_bytes());
+    let banner_bytes = ft(&ft_addr, Meta::new(Direction::Response, "pop3", src_addr,
+        &ft_dst_ip, ft_dst_port, &log_name, log_pid), banner_line.as_bytes()).await;
+    send!(writer, resp_transcript, &banner_bytes);
 
     let mut line = String::new();
     let mut authenticated = false;
@@ -70,59 +89,61 @@ async fn handle_pop(
         let cmd = parts[0].to_uppercase();
         let arg = parts.get(1).cloned().unwrap_or("");
 
+        macro_rules! ft_send {
+            ($data:expr) => {{
+                let out = ft(&ft_addr, Meta::new(Direction::Response, "pop3", src_addr,
+                    &ft_dst_ip, ft_dst_port, &log_name, log_pid), $data).await;
+                send!(writer, resp_transcript, &out);
+            }};
+        }
+
         match cmd.as_str() {
             "USER" => {
                 username = arg.to_string();
                 log_pop("USER", &username, &src_addr, &config);
-                send!(writer, resp_transcript, b"+OK User accepted\r\n");
+                ft_send!(b"+OK User accepted\r\n");
             }
             "PASS" => {
                 log_pop("PASS", &format!("user={} pass={}", username, arg), &src_addr, &config);
                 authenticated = true;
-                send!(writer, resp_transcript, b"+OK Maildrop ready, 1 message\r\n");
+                ft_send!(b"+OK Maildrop ready, 1 message\r\n");
             }
             "STAT" => {
                 if authenticated {
                     let msg = format!("+OK 1 {}\r\n", FAKE_EMAIL.len());
-                    send!(writer, resp_transcript, msg.as_bytes());
+                    ft_send!(msg.as_bytes());
                 } else {
-                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
+                    ft_send!(b"-ERR Not authenticated\r\n");
                 }
             }
             "LIST" => {
                 if authenticated {
                     let msg = format!("+OK 1 message\r\n1 {}\r\n.\r\n", FAKE_EMAIL.len());
-                    send!(writer, resp_transcript, msg.as_bytes());
+                    ft_send!(msg.as_bytes());
                 } else {
-                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
+                    ft_send!(b"-ERR Not authenticated\r\n");
                 }
             }
             "RETR" => {
                 log_pop("RETR", arg, &src_addr, &config);
                 if authenticated {
                     let msg = format!("+OK {} octets\r\n{}\r\n.\r\n", FAKE_EMAIL.len(), FAKE_EMAIL);
-                    send!(writer, resp_transcript, msg.as_bytes());
+                    ft_send!(msg.as_bytes());
                 } else {
-                    send!(writer, resp_transcript, b"-ERR Not authenticated\r\n");
+                    ft_send!(b"-ERR Not authenticated\r\n");
                 }
             }
-            "DELE" => {
-                send!(writer, resp_transcript, b"+OK Message deleted\r\n");
-            }
-            "NOOP" => {
-                send!(writer, resp_transcript, b"+OK\r\n");
-            }
-            "RSET" => {
-                send!(writer, resp_transcript, b"+OK\r\n");
-            }
+            "DELE" => { ft_send!(b"+OK Message deleted\r\n"); }
+            "NOOP" => { ft_send!(b"+OK\r\n"); }
+            "RSET" => { ft_send!(b"+OK\r\n"); }
             "QUIT" => {
                 log_pop("QUIT", "", &src_addr, &config);
-                send!(writer, resp_transcript, b"+OK Goodbye\r\n");
+                ft_send!(b"+OK Goodbye\r\n");
                 break;
             }
             _ => {
                 debug!("Unknown POP3 command: {}", cmd);
-                send!(writer, resp_transcript, b"-ERR Unknown command\r\n");
+                ft_send!(b"-ERR Unknown command\r\n");
             }
         }
     }

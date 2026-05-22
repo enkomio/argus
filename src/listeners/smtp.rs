@@ -8,6 +8,7 @@ use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
 use crate::conn_table::SharedConnTable;
+use crate::forward_to::{self, Direction, Meta};
 use crate::request_logger::SharedRequestLogger;
 
 fn log_smtp(event: &str, detail: &str, src_addr: &SocketAddr, config: &ListenerConfig) {
@@ -20,6 +21,15 @@ macro_rules! send {
         $resp.extend_from_slice($data);
         $writer.write_all($data).await?
     }};
+}
+
+/// Apply ForwardTo to `data` if `ft_addr` is set, otherwise return `data` unchanged.
+async fn ft(ft_addr: &Option<String>, meta: Meta, data: &[u8]) -> Vec<u8> {
+    if let Some(ref addr) = ft_addr {
+        forward_to::call(addr, &meta, data).await
+    } else {
+        data.to_vec()
+    }
 }
 
 async fn handle_smtp(
@@ -44,10 +54,19 @@ async fn handle_smtp(
     let mut req_transcript:  Vec<u8> = Vec::new();
     let mut resp_transcript: Vec<u8> = Vec::new();
 
+    // ForwardTo connection info (resolved once per session)
+    let ci = conn_table.read().ok().and_then(|t| t.get(&src_addr.port()).cloned());
+    let (ft_dst_ip, ft_dst_port) = ci.as_ref()
+        .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
+        .unwrap_or_default();
+    let ft_addr = config.forward_to.clone();
+
     let banner = config.banner.as_deref()
         .unwrap_or("220 argus.local SMTP Service Ready");
     let banner_line = format!("{}\r\n", banner);
-    send!(writer, resp_transcript, banner_line.as_bytes());
+    let banner_bytes = ft(&ft_addr, Meta::new(Direction::Response, "smtp", src_addr,
+        &ft_dst_ip, ft_dst_port, &log_name, log_pid), banner_line.as_bytes()).await;
+    send!(writer, resp_transcript, &banner_bytes);
 
     let mut mail_from = String::new();
     let mut rcpt_to = Vec::new();
@@ -63,6 +82,15 @@ async fn handle_smtp(
         }
         req_transcript.extend_from_slice(line.as_bytes());
 
+        // Helper: pass response through ForwardTo (if configured) then send.
+        macro_rules! ft_send {
+            ($data:expr) => {{
+                let out = ft(&ft_addr, Meta::new(Direction::Response, "smtp", src_addr,
+                    &ft_dst_ip, ft_dst_port, &log_name, log_pid), $data).await;
+                send!(writer, resp_transcript, &out);
+            }};
+        }
+
         let cmd = line.trim().to_uppercase();
 
         if in_data {
@@ -74,7 +102,7 @@ async fn handle_smtp(
                     info!("    {}", data_line);
                 }
                 email_data.clear();
-                send!(writer, resp_transcript, b"250 OK: Message accepted\r\n");
+                ft_send!(b"250 OK: Message accepted\r\n");
             } else {
                 email_data.extend_from_slice(line.as_bytes());
             }
@@ -84,39 +112,36 @@ async fn handle_smtp(
         if cmd.starts_with("EHLO") || cmd.starts_with("HELO") {
             let domain = line.trim()[4..].trim().to_string();
             log_smtp(&cmd[..4], &domain, &src_addr, &config);
-            send!(writer, resp_transcript, b"250-argus.local\r\n");
-            send!(writer, resp_transcript, b"250-SIZE 10240000\r\n");
-            send!(writer, resp_transcript, b"250-AUTH LOGIN PLAIN\r\n");
-            send!(writer, resp_transcript, b"250 HELP\r\n");
+            ft_send!(b"250-argus.local\r\n250-SIZE 10240000\r\n250-AUTH LOGIN PLAIN\r\n250 HELP\r\n");
         } else if cmd.starts_with("MAIL FROM:") {
             mail_from = line[10..].trim().trim_matches(|c| c == '<' || c == '>').to_string();
             log_smtp("MAIL FROM", &mail_from, &src_addr, &config);
-            send!(writer, resp_transcript, b"250 OK\r\n");
+            ft_send!(b"250 OK\r\n");
         } else if cmd.starts_with("RCPT TO:") {
             let rcpt = line[8..].trim().trim_matches(|c| c == '<' || c == '>').to_string();
             log_smtp("RCPT TO", &rcpt, &src_addr, &config);
             rcpt_to.push(rcpt);
-            send!(writer, resp_transcript, b"250 OK\r\n");
+            ft_send!(b"250 OK\r\n");
         } else if cmd.starts_with("DATA") {
             log_smtp("DATA", "starting message body", &src_addr, &config);
             in_data = true;
-            send!(writer, resp_transcript, b"354 Start input, end with <CRLF>.<CRLF>\r\n");
+            ft_send!(b"354 Start input, end with <CRLF>.<CRLF>\r\n");
         } else if cmd.starts_with("AUTH") {
             log_smtp("AUTH", line.trim(), &src_addr, &config);
-            send!(writer, resp_transcript, b"235 Authentication successful\r\n");
+            ft_send!(b"235 Authentication successful\r\n");
         } else if cmd.starts_with("QUIT") {
             log_smtp("QUIT", "", &src_addr, &config);
-            send!(writer, resp_transcript, b"221 Bye\r\n");
+            ft_send!(b"221 Bye\r\n");
             break;
         } else if cmd.starts_with("RSET") {
             mail_from.clear();
             rcpt_to.clear();
-            send!(writer, resp_transcript, b"250 OK\r\n");
+            ft_send!(b"250 OK\r\n");
         } else if cmd.starts_with("NOOP") {
-            send!(writer, resp_transcript, b"250 OK\r\n");
+            ft_send!(b"250 OK\r\n");
         } else {
             debug!("Unknown SMTP command: {}", cmd);
-            send!(writer, resp_transcript, b"500 Command not recognized\r\n");
+            ft_send!(b"500 Command not recognized\r\n");
         }
     }
 

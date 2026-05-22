@@ -25,6 +25,7 @@ use regex::Regex;
 
 use crate::config::ListenerConfig;
 use crate::conn_table::SharedConnTable;
+use crate::forward_to::{self, Direction, Meta};
 use crate::request_logger::SharedRequestLogger;
 
 // ---------------------------------------------------------------------------
@@ -678,17 +679,31 @@ where
         0
     };
 
+    // -- ForwardTo: request ----------------------------------------------------
+    let ft_ci = conn_table.read().ok().and_then(|t| t.get(&src_addr.port()).cloned());
+    let (ft_dst_ip, ft_dst_port) = ft_ci.as_ref()
+        .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
+        .unwrap_or_default();
+    let req_bytes = if let Some(ref ft_addr) = config.forward_to {
+        let meta = Meta::new(Direction::Request, proto, src_addr,
+            &ft_dst_ip, ft_dst_port, &log_name, log_pid);
+        forward_to::call(ft_addr, &meta, &buf[..n]).await
+    } else {
+        buf[..n].to_vec()
+    };
+    let req_slice = &req_bytes;
+
     // -- Log request (always, even when parsing fails below) -------------------
     if should_log {
         if let Some(ref logger) = request_logger {
-            if let Err(e) = logger.log(log_pid, &log_name, proto, log_counter, "req", &buf[..n]) {
+            if let Err(e) = logger.log(log_pid, &log_name, proto, log_counter, "req", req_slice) {
                 warn!("Request log write failed: {}", e);
             }
         }
     }
 
     // -- Parse request line and headers ----------------------------------------
-    let request = String::from_utf8_lossy(&buf[..n]);
+    let request = String::from_utf8_lossy(req_slice);
     let lines: Vec<&str> = request.lines().collect();
     if lines.is_empty() { return Ok(()); }
 
@@ -730,6 +745,10 @@ where
         None
     };
 
+    // -- ForwardTo: response meta (used by both passthrough and intercept paths)
+    let ft_meta_rsp = Meta::new(Direction::Response, proto, src_addr,
+        &ft_dst_ip, ft_dst_port, &log_name, log_pid);
+
     // -- Passthrough path ------------------------------------------------------
     if let Some(ref dst_addr) = passthrough_dst {
         let label = conn_info.as_ref().map(|info| {
@@ -763,8 +782,9 @@ where
                                         Ok(tls_remote) => {
                                             if let Err(e) = passthrough_and_log(
                                                 tls_remote, &mut stream_r, &mut stream_w,
-                                                &buf[..n], should_log,
+                                                req_slice, should_log,
                                                 &request_logger, log_pid, &log_name, proto, log_counter,
+                                                &config.forward_to, ft_meta_rsp.clone(),
                                             ).await {
                                                 debug!("TLS passthrough error: {}", e);
                                             }
@@ -781,8 +801,9 @@ where
                     // Plain TCP passthrough.
                     if let Err(e) = passthrough_and_log(
                         tcp_remote, &mut stream_r, &mut stream_w,
-                        &buf[..n], should_log,
+                        req_slice, should_log,
                         &request_logger, log_pid, &log_name, proto, log_counter,
+                        &config.forward_to, ft_meta_rsp.clone(),
                     ).await {
                         debug!("TCP passthrough error: {}", e);
                     }
@@ -813,6 +834,13 @@ where
         response.extend_from_slice(&body);
     }
 
+    // -- ForwardTo: response ---------------------------------------------------
+    let response = if let Some(ref ft_addr) = config.forward_to {
+        forward_to::call(ft_addr, &ft_meta_rsp, &response).await
+    } else {
+        response
+    };
+
     let _ = stream_w.write_all(&response).await;
     let _ = stream_w.flush().await;
 
@@ -830,6 +858,10 @@ where
 /// Helper: write `req_bytes` to `remote`, then capture/log the response, then
 /// drain for keep-alive.  Extracted to avoid code duplication between the
 /// plain-TCP and TLS passthrough branches.
+///
+/// When `ft_addr` is `Some`, the response is first buffered (not streamed),
+/// passed through the ForwardTo endpoint, and then sent to the client.
+/// This ensures ForwardTo sees passthrough traffic too.
 async fn passthrough_and_log<S, R, W>(
     remote: S,
     client_r: &mut R,
@@ -841,6 +873,8 @@ async fn passthrough_and_log<S, R, W>(
     log_name: &str,
     proto: &str,
     log_counter: u32,
+    ft_addr: &Option<String>,
+    ft_meta_rsp: Meta,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -854,12 +888,29 @@ where
         return Ok(());
     }
 
-    if should_log {
-        let rsp_bytes = capture_http_response(client_r, client_w, &mut s_r, &mut s_w).await;
-        if let Some(ref logger) = request_logger {
-            if !rsp_bytes.is_empty() {
-                if let Err(e) = logger.log(log_pid, log_name, proto, log_counter, "rsp", &rsp_bytes) {
-                    warn!("Response log write failed: {}", e);
+    if should_log || ft_addr.is_some() {
+        // Buffer the full response without streaming it to the client yet —
+        // we need to optionally pass it through ForwardTo first.
+        let mut sink = tokio::io::sink();
+        let rsp_bytes = capture_http_response(client_r, &mut sink, &mut s_r, &mut s_w).await;
+
+        // Apply ForwardTo to the (possibly buffered) response.
+        let rsp_bytes = if let Some(ref addr) = ft_addr {
+            forward_to::call(addr, &ft_meta_rsp, &rsp_bytes).await
+        } else {
+            rsp_bytes
+        };
+
+        // Send (possibly modified) response to client.
+        let _ = client_w.write_all(&rsp_bytes).await;
+
+        // Log the final response bytes.
+        if should_log {
+            if let Some(ref logger) = request_logger {
+                if !rsp_bytes.is_empty() {
+                    if let Err(e) = logger.log(log_pid, log_name, proto, log_counter, "rsp", &rsp_bytes) {
+                        warn!("Response log write failed: {}", e);
+                    }
                 }
             }
         }

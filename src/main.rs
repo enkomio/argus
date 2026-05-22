@@ -2,6 +2,7 @@
 
 mod config;
 mod conn_table;
+mod forward_to;
 mod listeners;
 mod diverter;
 mod logger;

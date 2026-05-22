@@ -8,6 +8,7 @@ use tracing::{info, warn, debug};
 
 use crate::config::ListenerConfig;
 use crate::conn_table::SharedConnTable;
+use crate::forward_to::{self, Direction, Meta};
 use crate::request_logger::SharedRequestLogger;
 
 fn hexdump(data: &[u8]) -> Vec<String> {
@@ -72,12 +73,27 @@ async fn handle_tcp_connection(
         req_transcript.extend_from_slice(data);
         log_raw(data, &src_addr, &config, "RAW-TCP");
 
-        // Echo back
-        if let Err(e) = stream.write_all(data).await {
+        // ── ForwardTo: request + response ─────────────────────────────────
+        let echo_bytes: Vec<u8> = if let Some(ref ft_addr) = config.forward_to {
+            let (pid, proc_name) = crate::conn_table::get_process_info(&conn_table, src_addr.port());
+            let ci = conn_table.read().ok().and_then(|t| t.get(&src_addr.port()).cloned());
+            let (dst_ip, dst_port) = ci.as_ref()
+                .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
+                .unwrap_or_default();
+            let req_meta = Meta::new(Direction::Request, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
+            let modified_req = forward_to::call(ft_addr, &req_meta, data).await;
+            let rsp_meta = Meta::new(Direction::Response, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
+            forward_to::call(ft_addr, &rsp_meta, &modified_req).await
+        } else {
+            data.to_vec()
+        };
+
+        // Echo back (modified if ForwardTo is set, original otherwise)
+        if let Err(e) = stream.write_all(&echo_bytes).await {
             debug!("Write error to {}: {}", src_addr, e);
             break;
         }
-        resp_transcript.extend_from_slice(data);
+        resp_transcript.extend_from_slice(&echo_bytes);
     }
 
     if should_log {

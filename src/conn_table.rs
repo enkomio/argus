@@ -14,6 +14,7 @@ use regex::Regex;
 #[derive(Clone, Debug)]
 pub struct ConnInfo {
     /// The app's real source IP.
+    #[allow(dead_code)]
     pub orig_src_ip: IpAddr,
     /// The external destination IP the app was trying to reach.
     pub orig_dst_ip: IpAddr,

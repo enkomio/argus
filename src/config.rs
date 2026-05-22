@@ -4,7 +4,6 @@ use anyhow::{Result, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +71,17 @@ pub struct ListenerConfig {
     ///
     /// An empty or absent `NoLog` key means every connection is logged.
     pub no_log: Vec<String>,
+
+    /// Optional external modifier endpoint (`"IP:PORT"`).
+    ///
+    /// When set, every intercepted request and response is forwarded to this
+    /// TCP endpoint before being processed or sent back to the client.  The
+    /// endpoint receives a framed message (JSON metadata + raw payload) and
+    /// must reply with the (possibly modified) payload bytes.
+    ///
+    /// See `src/forward_to.rs` for the exact wire format and a minimal Python
+    /// example.
+    pub forward_to: Option<String>,
 }
 
 impl Default for ArgusConfig {
@@ -150,8 +160,13 @@ impl ArgusConfig {
                 .unwrap_or(false);
         }
 
-        // Parse listener sections
+        // Parse listener sections.
+        // `found_any` is true whenever the config file contained at least one
+        // listener section (even if all are disabled).  The default listener
+        // list is only used as a fallback when the config file has NO listener
+        // sections at all — it is never used to override explicit Enabled: False.
         config.listeners.clear();
+        let mut found_any = false;
         for (section, data) in &section_data {
             if section == "Argus" || section == "Diverter" {
                 continue;
@@ -161,6 +176,8 @@ impl ArgusConfig {
                 .get("enabled")
                 .map(|v| v.to_lowercase() == "true" || v.to_lowercase() == "yes")
                 .unwrap_or(false);
+
+            found_any = true;
 
             if !enabled {
                 continue;
@@ -230,14 +247,19 @@ impl ArgusConfig {
                          .collect()
                     })
                     .unwrap_or_default(),
+                forward_to: data.get("forwardto").cloned(),
             };
 
             config.listeners.push(listener);
         }
 
         if config.listeners.is_empty() {
-            info!("No listeners found in config, using defaults");
-            config.listeners = Self::default_listeners();
+            if found_any {
+                info!("All listeners are disabled in config — none will be started.");
+            } else {
+                info!("No listener sections found in config, using defaults");
+                config.listeners = Self::default_listeners();
+            }
         }
 
         Ok(config)
@@ -262,6 +284,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
             ListenerConfig {
                 name: "HTTPSListener".to_string(),
@@ -280,6 +303,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
             ListenerConfig {
                 name: "DNSListener".to_string(),
@@ -298,6 +322,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
             ListenerConfig {
                 name: "SMTPListener".to_string(),
@@ -316,6 +341,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
             ListenerConfig {
                 name: "RawTCPListener".to_string(),
@@ -334,6 +360,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
             ListenerConfig {
                 name: "POPListener".to_string(),
@@ -352,6 +379,7 @@ impl ArgusConfig {
                 custom_responses: HashMap::new(),
                 passthrough: vec![],
                 no_log: vec![],
+                forward_to: None,
             },
         ]
     }

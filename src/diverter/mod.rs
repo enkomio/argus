@@ -63,7 +63,7 @@ impl Diverter {
             return Ok(Self { thread: None, raw_handle: 0 });
         }
 
-        info!("Diverter filter: {}", filter);
+        debug!("Diverter filter: {}", filter);
 
         let handle = WinDivert::network(&filter, 0i16, WinDivertFlags::new())
             .with_context(|| format!(
