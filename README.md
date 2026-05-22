@@ -1,7 +1,7 @@
 # Argus
 
 <p align="center">
-  <img src="media/logo.png" alt="Argus logo" width="200"/>
+  <img src="media/logo.png" alt="Argus logo" width="500"/>
 </p>
 
 A Windows network traffic interception tool for malware analysis, written in Rust.
