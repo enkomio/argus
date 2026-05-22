@@ -28,3 +28,6 @@ desktop.ini
 
 # Claude Code
 /.claude
+
+# Python
+__pycache__
