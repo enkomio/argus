@@ -632,6 +632,62 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Full HTTP request reader
+// ---------------------------------------------------------------------------
+
+/// Read a complete HTTP request (headers + body) from `reader`.
+///
+/// Strategy:
+/// 1. Buffer until the header block ends (`\r\n\r\n`).
+/// 2. If `Content-Length` is present, read exactly that many more bytes.
+/// 3. For all other cases (GET/HEAD/no body) return after the headers.
+///
+/// Returns `None` on a closed connection or timeout before any byte arrives.
+/// Capped at 64 MiB to avoid unbounded memory use.
+async fn read_full_http_request<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    timeout: tokio::time::Duration,
+) -> Option<Vec<u8>> {
+    const MAX_REQUEST: usize = 64 * 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::with_capacity(8192);
+    let mut tmp = vec![0u8; 8192];
+
+    // -- Phase 1: read until header block is complete -------------------------
+    let headers_end = loop {
+        if let Some(pos) = find_headers_end(&buf) {
+            break pos;
+        }
+        if buf.len() >= MAX_REQUEST {
+            break buf.len(); // safety cap — treat as headers-only
+        }
+        match tokio::time::timeout(timeout, reader.read(&mut tmp)).await {
+            Ok(Ok(0)) | Err(_) => {
+                return if buf.is_empty() { None } else { Some(buf) };
+            }
+            Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+            Ok(Err(_)) => {
+                return if buf.is_empty() { None } else { Some(buf) };
+            }
+        }
+    };
+
+    // -- Phase 2: read body according to Content-Length -----------------------
+    if let Some(content_len) = parse_content_length(&buf[..headers_end]) {
+        let target = (headers_end + content_len).min(MAX_REQUEST);
+        while buf.len() < target {
+            match tokio::time::timeout(timeout, reader.read(&mut tmp)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+                Ok(Err(_)) => break,
+            }
+        }
+    }
+    // Chunked request bodies are left as-is (uncommon in malware traffic).
+
+    Some(buf)
+}
+
+// ---------------------------------------------------------------------------
 // Connection handler (generic: works with plain TCP and TLS streams)
 // ---------------------------------------------------------------------------
 
@@ -654,15 +710,12 @@ where
         None
     };
 
-    // -- Read HTTP request -----------------------------------------------------
+    // -- Read HTTP request (headers + full body) --------------------------------
     let timeout = tokio::time::Duration::from_secs(config.timeout);
-    let mut buf = vec![0u8; 8192];
-    let n = match tokio::time::timeout(timeout, stream_r.read(&mut buf)).await {
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => { debug!("Read error from {}: {}", src_addr, e); return Ok(()); }
-        Err(_)    => { debug!("Connection timeout from {}", src_addr); return Ok(()); }
+    let buf = match read_full_http_request(&mut stream_r, timeout).await {
+        Some(b) if !b.is_empty() => b,
+        _ => return Ok(()),
     };
-    if n == 0 { return Ok(()); }
 
     // -- Process identity + log counter (phase 1: before header parsing) -------
     // These must be computed here so the request is always logged even if
@@ -687,9 +740,9 @@ where
     let req_bytes = if let Some(ref ft_addr) = config.forward_to {
         let meta = Meta::new(Direction::Request, proto, src_addr,
             &ft_dst_ip, ft_dst_port, &log_name, log_pid);
-        forward_to::call(ft_addr, &meta, &buf[..n]).await
+        forward_to::call(ft_addr, &meta, &buf).await
     } else {
-        buf[..n].to_vec()
+        buf
     };
     let req_slice = &req_bytes;
 
