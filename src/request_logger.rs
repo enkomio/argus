@@ -84,7 +84,7 @@ impl RequestLogger {
             .join(&safe_listener);
         std::fs::create_dir_all(&dir)?;
 
-        let filename = format!("{}_{:04}_{}.log", timestamp, counter, safe_action);
+        let filename = format!("{}_{:07}_{:07}_{}.log", timestamp, pid, counter, safe_action);
         let path = dir.join(&filename);
         std::fs::write(&path, content)?;
         Ok(path)
