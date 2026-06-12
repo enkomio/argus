@@ -303,6 +303,7 @@ pub async fn start(
 
         let raw_data = buf[..n].to_vec();
         let cfg  = config.clone();
+        let ft_request_id = forward_to::next_request_id();
 
         // ── ForwardTo: request ────────────────────────────────────────────
         let data = if let Some(ref ft_addr) = cfg.forward_to {
@@ -311,7 +312,7 @@ pub async fn start(
             let (dst_ip, dst_port) = ci.as_ref()
                 .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
                 .unwrap_or_default();
-            let meta = Meta::new(Direction::Request, "dns", src_addr, dst_ip, dst_port, proc_name, pid);
+            let meta = Meta::new(ft_request_id, Direction::Request, "dns", src_addr, dst_ip, dst_port, proc_name, pid);
             forward_to::call(ft_addr, &meta, &raw_data).await
         } else {
             raw_data
@@ -425,7 +426,7 @@ pub async fn start(
 
         // ── ForwardTo: response ───────────────────────────────────────────
         let response = if let Some(ref ft_addr) = cfg.forward_to {
-            let meta = Meta::new(Direction::Response, "dns", src_addr,
+            let meta = Meta::new(ft_request_id, Direction::Response, "dns", src_addr,
                 &proc_label, 53, &proc_name, pid);
             forward_to::call(ft_addr, &meta, &fake).await
         } else {

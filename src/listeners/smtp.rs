@@ -64,7 +64,7 @@ async fn handle_smtp(
     let banner = config.banner.as_deref()
         .unwrap_or("220 argus.local SMTP Service Ready");
     let banner_line = format!("{}\r\n", banner);
-    let banner_bytes = ft(&ft_addr, Meta::new(Direction::Response, "smtp", src_addr,
+    let banner_bytes = ft(&ft_addr, Meta::new(forward_to::next_request_id(), Direction::Response, "smtp", src_addr,
         &ft_dst_ip, ft_dst_port, &log_name, log_pid), banner_line.as_bytes()).await;
     send!(writer, resp_transcript, &banner_bytes);
 
@@ -82,10 +82,12 @@ async fn handle_smtp(
         }
         req_transcript.extend_from_slice(line.as_bytes());
 
+        let ft_request_id = forward_to::next_request_id();
+
         // Helper: pass response through ForwardTo (if configured) then send.
         macro_rules! ft_send {
             ($data:expr) => {{
-                let out = ft(&ft_addr, Meta::new(Direction::Response, "smtp", src_addr,
+                let out = ft(&ft_addr, Meta::new(ft_request_id, Direction::Response, "smtp", src_addr,
                     &ft_dst_ip, ft_dst_port, &log_name, log_pid), $data).await;
                 send!(writer, resp_transcript, &out);
             }};

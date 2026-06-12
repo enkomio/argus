@@ -42,15 +42,19 @@
 //!     meta = json.loads(recv_exact(conn, hlen))
 //!     plen = struct.unpack(">I", recv_exact(conn, 4))[0]
 //!     payload = recv_exact(conn, plen)
-//!     print(meta["direction"], meta["protocol"], len(payload), "bytes")
+//!     # meta["request_id"] is shared between a request and its response,
+//!     # so the two can be correlated.
+//!     print(meta["request_id"], meta["direction"], meta["protocol"], len(payload), "bytes")
 //!     # Return payload unchanged
 //!     conn.sendall(struct.pack(">I", len(payload)) + payload)
 //!     conn.close()
 //! ```
 
 use anyhow::{Context, Result};
+use colored::Colorize;
 use serde::Serialize;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
@@ -67,10 +71,23 @@ pub enum Direction {
     Response,
 }
 
+/// Global counter used to generate unique request/exchange identifiers.
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a new unique exchange ID. Call once per request/response cycle
+/// and pass the same value to both the request and response `Meta` so the
+/// ForwardTo endpoint can correlate them.
+pub fn next_request_id() -> u64 {
+    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Metadata serialised as JSON and prepended to every frame sent to the
 /// ForwardTo endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct Meta {
+    /// Unique ID shared by the request and its associated response, so the
+    /// ForwardTo endpoint can correlate the two.
+    pub request_id: u64,
     /// `"request"` or `"response"`.
     pub direction: Direction,
     /// Listener protocol: `"http"`, `"https"`, `"dns"`, `"smtp"`, `"pop3"`, `"raw"`.
@@ -91,6 +108,7 @@ pub struct Meta {
 
 impl Meta {
     pub fn new(
+        request_id: u64,
         direction: Direction,
         protocol: &'static str,
         src_addr: SocketAddr,
@@ -100,6 +118,7 @@ impl Meta {
         pid: u32,
     ) -> Self {
         Self {
+            request_id,
             direction,
             protocol,
             src_ip: src_addr.ip().to_string(),
@@ -134,6 +153,13 @@ pub async fn call(addr: &str, meta: &Meta, payload: &[u8]) -> Vec<u8> {
         }
         Err(e) => {
             warn!("ForwardTo [{}] error: {:#} — using original payload", addr, e);
+            println!(
+                "{} {} {:?}: {:#} — using original payload",
+                "[ForwardTo]".bright_red().bold(),
+                format!("{} unreachable or returned invalid data", addr).yellow(),
+                meta.direction,
+                e,
+            );
             payload.to_vec()
         }
     }

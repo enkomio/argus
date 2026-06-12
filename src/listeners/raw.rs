@@ -80,9 +80,10 @@ async fn handle_tcp_connection(
             let (dst_ip, dst_port) = ci.as_ref()
                 .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
                 .unwrap_or_default();
-            let req_meta = Meta::new(Direction::Request, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
+            let ft_request_id = forward_to::next_request_id();
+            let req_meta = Meta::new(ft_request_id, Direction::Request, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
             let modified_req = forward_to::call(ft_addr, &req_meta, data).await;
-            let rsp_meta = Meta::new(Direction::Response, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
+            let rsp_meta = Meta::new(ft_request_id, Direction::Response, "raw", src_addr, &dst_ip, dst_port, &proc_name, pid);
             forward_to::call(ft_addr, &rsp_meta, &modified_req).await
         } else {
             data.to_vec()

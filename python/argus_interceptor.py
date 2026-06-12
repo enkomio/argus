@@ -44,6 +44,7 @@ Handler signature
     def handler(meta: Meta, payload: bytes) -> bytes
 
     meta fields:
+        meta.request_id unique ID shared by a request and its response (int)
         meta.direction  "request" | "response"
         meta.protocol   "http" | "https" | "dns" | "smtp" | "pop3" | "raw"
         meta.src_ip     client source IP (str)
@@ -85,6 +86,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class Meta:
     """Metadata attached to every intercepted payload."""
+    request_id: int  # shared by a request and its associated response
     direction: str   # "request" | "response"
     protocol:  str   # "http" | "https" | "dns" | "smtp" | "pop3" | "raw"
     src_ip:    str
@@ -97,6 +99,7 @@ class Meta:
     @classmethod
     def _from_dict(cls, d: dict) -> "Meta":
         return cls(
+            request_id = int(d.get("request_id", 0)),
             direction = d.get("direction", ""),
             protocol  = d.get("protocol",  ""),
             src_ip    = d.get("src_ip",    ""),

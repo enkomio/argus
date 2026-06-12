@@ -737,8 +737,9 @@ where
     let (ft_dst_ip, ft_dst_port) = ft_ci.as_ref()
         .map(|i| (i.orig_dst_ip.to_string(), i.orig_dst_port))
         .unwrap_or_default();
+    let ft_request_id = forward_to::next_request_id();
     let req_bytes = if let Some(ref ft_addr) = config.forward_to {
-        let meta = Meta::new(Direction::Request, proto, src_addr,
+        let meta = Meta::new(ft_request_id, Direction::Request, proto, src_addr,
             &ft_dst_ip, ft_dst_port, &log_name, log_pid);
         forward_to::call(ft_addr, &meta, &buf).await
     } else {
@@ -799,7 +800,7 @@ where
     };
 
     // -- ForwardTo: response meta (used by both passthrough and intercept paths)
-    let ft_meta_rsp = Meta::new(Direction::Response, proto, src_addr,
+    let ft_meta_rsp = Meta::new(ft_request_id, Direction::Response, proto, src_addr,
         &ft_dst_ip, ft_dst_port, &log_name, log_pid);
 
     // -- Passthrough path ------------------------------------------------------

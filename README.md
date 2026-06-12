@@ -302,8 +302,9 @@ endpoint → Argus:
 
 **JSON metadata fields:**
 
-| Field      | Type   | Description                                          |
-|------------|--------|------------------------------------------------------|
+| Field        | Type   | Description                                          |
+|--------------|--------|------------------------------------------------------|
+| `request_id` | number | Unique ID shared by a request and its associated response, for correlation |
 | `direction`| string | `"request"` or `"response"`                         |
 | `protocol` | string | `"http"`, `"https"`, `"dns"`, `"smtp"`, `"pop3"`, `"raw"` |
 | `src_ip`   | string | Client source IP                                     |

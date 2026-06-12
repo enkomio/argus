@@ -69,7 +69,7 @@ async fn handle_pop(
 
     let banner = config.banner.as_deref().unwrap_or("+OK Argus POP3 Server Ready");
     let banner_line = format!("{}\r\n", banner);
-    let banner_bytes = ft(&ft_addr, Meta::new(Direction::Response, "pop3", src_addr,
+    let banner_bytes = ft(&ft_addr, Meta::new(forward_to::next_request_id(), Direction::Response, "pop3", src_addr,
         &ft_dst_ip, ft_dst_port, &log_name, log_pid), banner_line.as_bytes()).await;
     send!(writer, resp_transcript, &banner_bytes);
 
@@ -89,9 +89,11 @@ async fn handle_pop(
         let cmd = parts[0].to_uppercase();
         let arg = parts.get(1).cloned().unwrap_or("");
 
+        let ft_request_id = forward_to::next_request_id();
+
         macro_rules! ft_send {
             ($data:expr) => {{
-                let out = ft(&ft_addr, Meta::new(Direction::Response, "pop3", src_addr,
+                let out = ft(&ft_addr, Meta::new(ft_request_id, Direction::Response, "pop3", src_addr,
                     &ft_dst_ip, ft_dst_port, &log_name, log_pid), $data).await;
                 send!(writer, resp_transcript, &out);
             }};
